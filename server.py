@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Servidor para reTerminal E1002 con Server-Side Rendering (SSR)
-- Conecta directamente con el feed iCal de Outlook 365 (Bitali)
-- Filtra reuniones canceladas / eliminadas (STATUS:CANCELLED)
-- Extrae nombres reales de personas (;CN="...") y descarta bots/canales de Teams (19_meeting_...)
-- Pre-renderiza en el servidor para que la reTerminal capture siempre los datos completos
+- Filtra eventos cancelados (STATUS:CANCELLED) y eventos descartados (X-MICROSOFT-CDO-BUSYSTATUS:FREE)
+- Extracción avanzada de nombres reales (CN en ORGANIZER, ATTENDEE, X-MS-OLK-SENDER y LOCATION)
+- Descarte de identificadores de bots/canales de Teams (19_meeting, @thread.v2)
+- Entrega HTML pre-renderizado completo al instante
 """
 
 import http.server
@@ -30,7 +30,7 @@ SHEET_ID = "1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
 # Cachés en memoria
-CALENDAR_CACHE = {"events": [], "debug": {}, "timestamp": 0, "ttl": 600}
+CALENDAR_CACHE = {"events": [], "debug": {}, "timestamp": 0, "ttl": 300}
 FINANCE_CACHE = {"data": [], "timestamp": 0, "ttl": 300}
 WEATHER_CACHE = {"data": None, "timestamp": 0, "ttl": 900}
 
@@ -121,10 +121,45 @@ def is_clean_human_name(name):
     if not name:
         return False
     lower = name.lower().strip()
-    # Descartar bots, hilos internos de Teams y calendarios de salas/recursos genéricos
-    if any(x in lower for x in ('thread.v2', 'thread.tacv2', '19_meeting', '19:', 'resource.calendar', 'skype')):
+    # Descartar bots, hilos internos de Teams y calendarios de salas/recursos
+    bad_tokens = ('thread.', '19_meeting', '19:', 'resource.calendar', 'skype', 'microsoft teams', 'reunión de microsoft', 'sala piero', 'reunion de teams')
+    if any(x in lower for x in bad_tokens):
         return False
-    return True
+    # Descartar si es un email crudo
+    if '@' in lower and ('.com' in lower or '.ar' in lower):
+        return False
+    return len(name.strip()) >= 2
+
+def extract_people_from_vevent(raw):
+    people = []
+
+    # 1. Buscar nombres en ORGANIZER, ATTENDEE, X-MS-OLK-SENDER
+    person_lines = re.findall(r'(?:ATTENDEE|ORGANIZER|X-MS-OLK-SENDER)[^\r\n]+', raw, re.IGNORECASE)
+    for pline in person_lines:
+        cn_m = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', pline, re.IGNORECASE)
+        if cn_m:
+            cand = (cn_m.group(1) or cn_m.group(2)).strip()
+            if is_clean_human_name(cand) and cand not in people:
+                people.append(cand)
+        else:
+            email_m = re.search(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', pline, re.IGNORECASE)
+            if email_m:
+                em = email_m.group(1).strip()
+                if is_clean_human_name(em):
+                    cand = em.split('@')[0].replace('.', ' ').title()
+                    if cand not in people:
+                        people.append(cand)
+
+    # 2. Buscar si el convocante está incluido en LOCATION (muy común en Teams/Piero: "Reunión Teams; Sala Piero; Juan Rzeznik")
+    loc_m = re.search(r'LOCATION(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
+    if loc_m:
+        parts = loc_m.group(1).split(';')
+        for p in parts:
+            cand = p.strip()
+            if is_clean_human_name(cand) and len(cand) > 3 and cand not in people:
+                people.append(cand)
+
+    return people
 
 def get_calendar_data_and_debug(force_refresh=False):
     global CALENDAR_CACHE
@@ -183,10 +218,14 @@ def get_calendar_data_and_debug(force_refresh=False):
         today_code = weekday_map[now_ba.weekday()]
 
         for raw in raw_events:
-            # 1. FILTRAR REUNIONES CANCELADAS O ELIMINADAS (STATUS:CANCELLED)
-            status_m = re.search(r'STATUS:\s*([A-Z]+)', raw, re.IGNORECASE)
+            # 1. FILTRAR REUNIONES CANCELADAS (STATUS:CANCELLED) O ELIMINADAS (BUSYSTATUS:FREE)
+            status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
             status = status_m.group(1).upper() if status_m else ""
-            if status == "CANCELLED":
+            
+            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS:\s*([A-Z]+)', raw, re.IGNORECASE)
+            busy_status = busy_m.group(1).upper() if busy_m else ""
+
+            if status == "CANCELLED" or busy_status == "FREE":
                 debug_info["cancelled_filtered"] += 1
                 continue
 
@@ -194,30 +233,12 @@ def get_calendar_data_and_debug(force_refresh=False):
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
             summary = summary.replace('\\,', ',').replace('\\;', ';')
 
-            # Si el título empieza con Cancelado / Canceled, también se descarta
             if summary.lower().startswith("cancelado:") or summary.lower().startswith("canceled:"):
                 debug_info["cancelled_filtered"] += 1
                 continue
 
-            # 2. EXTRAER ASISTENTES Y ORGANIZADORES REALES (Sin bots de Teams 19_meeting)
-            people = []
-            person_lines = re.findall(r'(?:ATTENDEE|ORGANIZER)[^\r\n]+', raw, re.IGNORECASE)
-            for pline in person_lines:
-                # Extraer CN (nombre real, con o sin comillas)
-                cn_m = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', pline, re.IGNORECASE)
-                if cn_m:
-                    cand_name = (cn_m.group(1) or cn_m.group(2)).strip()
-                    if is_clean_human_name(cand_name) and cand_name not in people:
-                        people.append(cand_name)
-                else:
-                    # Fallback a email limpio
-                    email_m = re.search(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', pline, re.IGNORECASE)
-                    if email_m:
-                        em = email_m.group(1).strip()
-                        if is_clean_human_name(em):
-                            name_from_email = em.split('@')[0].replace('.', ' ').title()
-                            if name_from_email not in people:
-                                people.append(name_from_email)
+            # 2. EXTRAER PERSONAS REALES (Sin bots ni cadenas raras)
+            people = extract_people_from_vevent(raw)
 
             dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
@@ -234,11 +255,11 @@ def get_calendar_data_and_debug(force_refresh=False):
                 target_start = None
                 target_end = None
 
-                # Caso A: Evento único fechado hoy
+                # Caso A: Evento fechado hoy
                 if dt_end >= now_ba and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
-                # Caso B: Evento recurrente (RRULE)
+                # Caso B: Evento recurrente
                 elif rrule_m:
                     rrule_str = rrule_m.group(1).upper()
                     matches_recurrence = False
@@ -276,7 +297,7 @@ def get_calendar_data_and_debug(force_refresh=False):
         CALENDAR_CACHE["events"] = events
         CALENDAR_CACHE["debug"] = debug_info
         CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] {len(events)} citas activas encontradas ({debug_info['cancelled_filtered']} canceladas filtradas)")
+        print(f"[CALENDAR] {len(events)} citas activas encontradas ({debug_info['cancelled_filtered']} canceladas/libres ignoradas)")
     except Exception as e:
         debug_info["error"] = str(e)
         print(f"[CALENDAR] Error: {e}")
@@ -361,7 +382,7 @@ def build_ssr_html(template_content):
         cards = []
         for evt in events[:6]:
             roomy_cls = " roomy" if is_roomy else ""
-            att_text = ", ".join(evt.get("attendees", [])) if evt.get("attendees") else "Sin invitados registrados"
+            att_text = ", ".join(evt.get("attendees", [])) if evt.get("attendees") else "Compromiso personal"
             card = f"""
             <div class="event-card{roomy_cls}">
               <div class="event-top">
@@ -471,6 +492,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__ == "__main__":
-    print(f"Servidor activo en el puerto {PORT} con SSR y filtrado de canceladas")
+    print(f"Servidor activo en el puerto {PORT} con SSR y filtrado de BUSYSTATUS:FREE")
     with socketserver.TCPServer(("", PORT), RequestHandler) as httpd:
         httpd.serve_forever()
