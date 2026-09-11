@@ -240,7 +240,7 @@
     .empty-state-title { font-size: 13px; font-weight: 800; }
     .empty-state-sub { font-size: 11px; font-weight: 600; color: #333333; }
 
-    /* FINANZAS CON VELAS 60 DÍAS */
+    /* FINANZAS CON VELAS 60 DÍAS Y VARIACIÓN % AUMENTADA +50% */
     .stocks-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -261,21 +261,25 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
+      min-height: 24px;
     }
     .stock-sym {
       font-size: 12px;
       font-weight: 800;
       color: #000000;
     }
+    /* PÍLDORA +50% MAYOR (Font 14px, padding 2px 6px) */
     .badge-pill {
-      font-size: 9.5px;
+      font-size: 14px;
       font-weight: 800;
-      padding: 1px 4px;
-      border-radius: 3px;
+      padding: 2px 6px;
+      border-radius: 4px;
       color: #FFFFFF;
       display: inline-flex;
       align-items: center;
-      gap: 2px;
+      gap: 3px;
+      letter-spacing: -0.2px;
+      line-height: 1.1;
     }
     .badge-up { background-color: #008833; }
     .badge-down { background-color: #D60000; }
@@ -340,7 +344,7 @@
       </div>
     </div>
 
-    <!-- CLIMA ACTUAL CON ALTO CONTRASTE (SOL AMARILLO CON BORDE NEGRO NÍTIDO) -->
+    <!-- CLIMA ACTUAL CON ALTO CONTRASTE -->
     <div class="weather-current-box">
       <div class="weather-icon-box" id="weather-icon-box">
         <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -460,7 +464,7 @@
       });
     }
 
-    // 3. FINANZAS REALES CON GRÁFICO DE VELAS DE 60 DÍAS
+    // 3. FINANZAS REALES CON PÍLDORA +50% MAYOR
     function renderFinance(items) {
       const grid = document.getElementById('stocks-grid');
       if (!items || items.length === 0) {
@@ -484,8 +488,8 @@
         const isUp = st.up;
         const badgeClass = isUp ? 'badge-up' : 'badge-down';
         const arrowSvg = isUp
-          ? '<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>'
-          : '<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+          ? '<svg class="icon" style="width:11px;height:11px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>'
+          : '<svg class="icon" style="width:11px;height:11px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>';
 
         card.innerHTML = `
           <div class="stock-card-top">
@@ -499,19 +503,19 @@
       });
     }
 
-    // 4. CLIMA CON ÍCONOS DE ALTO CONTRASTE (BORDE NEGRO Y RELLENO AMARILLO/AZUL)
+    // 4. CLIMA CON ÍCONOS DE ALTO CONTRASTE
     function createHighContrastIcon(code, size=20) {
-      if (code === 0 || code === 1) { // Despejado
+      if (code === 0 || code === 1) {
         return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="12" cy="12" r="5" fill="#FFCC00" stroke="#000000" stroke-width="2"/>
           <path d="M12 1v3M12 20v3M1 12h3M20 12h3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="#000000" stroke-width="2" stroke-linecap="round"/>
         </svg>`;
-      } else if (code === 2 || code === 3) { // Nubes / Parcial
+      } else if (code === 2 || code === 3) {
         return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M17 17a5 5 0 0 0-10 0" fill="#FFCC00" stroke="#000000" stroke-width="1.5"/>
           <path d="M17.5 19H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 19z" fill="#FFFFFF" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
         </svg>`;
-      } else { // Lluvia / Tormenta
+      } else {
         return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M17.5 15H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 15z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
           <line x1="8" y1="18" x2="8" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>

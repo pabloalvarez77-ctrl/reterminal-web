@@ -558,7 +558,7 @@ def build_ssr_html(template_content):
         for st in stocks:
             is_up = st.get("up", True)
             badge_cls = "badge-up" if is_up else "badge-down"
-            arrow = """<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>""" if is_up else """<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>"""
+            arrow = """<svg class="icon" style="width:11px;height:11px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>""" if is_up else """<svg class="icon" style="width:11px;height:11px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>"""
             chart_svg = st.get("chart_svg", "")
             
             card = f"""
