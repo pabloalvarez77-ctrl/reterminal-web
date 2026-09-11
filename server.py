@@ -2,9 +2,10 @@
 """
 Servidor para reTerminal E1002
 - Conecta directamente con el feed iCal de Outlook 365 (Bitali)
-- Extrae todas las reuniones (únicas y recurrentes) en las próximas 8 horas
-- Extrae organizadores y nombres reales (CN) para cada cita (ej: Dolores Giardelli, Camila Ortiz)
-- Lee exclusivamente los activos desde tu Google Sheet 'Activos' (ID: 1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4)
+- Timeout ampliado a 35s y soporte de descompresión gzip (Microsoft OWA compila el .ics al vuelo)
+- Caché en memoria de 10 minutos para respuesta instantánea
+- Soporte para parámetros de Outlook y eventos recurrentes de Teams
+- Consulta dinámicamente tu Google Sheet 'Activos' (ID: 1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4)
 - Endpoint de diagnóstico en /api/debug_calendar
 """
 
@@ -14,6 +15,8 @@ import json
 import urllib.request
 import re
 import os
+import time
+import gzip
 from datetime import datetime, timedelta, timezone
 
 PORT = int(os.environ.get("PORT", 5000))
@@ -27,6 +30,14 @@ ICAL_URL = os.environ.get(
 # Google Sheet 'Activos' de Pablo
 SHEET_ID = "1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+
+# Caché en memoria para evitar demoras repetidas con Microsoft OWA
+CALENDAR_CACHE = {
+    "events": [],
+    "debug": {},
+    "timestamp": 0,
+    "ttl": 600  # 10 minutos
+}
 
 def get_tickers_from_sheet():
     try:
@@ -117,7 +128,17 @@ def parse_ical_dt(dt_raw, tz_ba):
     else:
         return dt.replace(tzinfo=tz_ba)
 
-def get_calendar_data_and_debug():
+def get_calendar_data_and_debug(force_refresh=False):
+    global CALENDAR_CACHE
+    now_ts = time.time()
+
+    # Si hay caché válido (menos de 10 min) y no se fuerza recarga, responde al instante
+    if not force_refresh and CALENDAR_CACHE["events"] and (now_ts - CALENDAR_CACHE["timestamp"]) < CALENDAR_CACHE["ttl"]:
+        debug_copy = dict(CALENDAR_CACHE["debug"])
+        debug_copy["from_cache"] = True
+        debug_copy["cache_age_seconds"] = int(now_ts - CALENDAR_CACHE["timestamp"])
+        return CALENDAR_CACHE["events"], debug_copy
+
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
@@ -130,24 +151,42 @@ def get_calendar_data_and_debug():
         "content_length": 0,
         "total_vevents": 0,
         "matched_events": 0,
+        "from_cache": False,
+        "download_duration_seconds": None,
         "error": None
     }
 
     events = []
 
     try:
+        t_start = time.time()
+        # Headers completos de navegador para Microsoft OWA
         req = urllib.request.Request(
             ICAL_URL,
             headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/calendar, text/plain, */*'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/calendar, text/plain, */*',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive'
             }
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        
+        # Timeout ampliado a 35 segundos (Microsoft OWA compila el ICS al vuelo y suele tardar 12-18s)
+        with urllib.request.urlopen(req, timeout=35) as resp:
             debug_info["http_status"] = resp.status
-            content = resp.read().decode('utf-8', errors='ignore')
+            raw_data = resp.read()
+            debug_info["download_duration_seconds"] = round(time.time() - t_start, 2)
+
+            # Descompresión transparente si el servidor responde con gzip
+            encoding = resp.headers.get("Content-Encoding", "").lower()
+            if "gzip" in encoding or raw_data.startswith(b'\x1f\x8b'):
+                content = gzip.decompress(raw_data).decode('utf-8', errors='ignore')
+            else:
+                content = raw_data.decode('utf-8', errors='ignore')
+
             debug_info["content_length"] = len(content)
 
+        # Desplegar líneas partidas según estándar RFC 5545
         unfolded = re.sub(r'\r?\n[ \t]', '', content)
         raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', unfolded, re.DOTALL | re.IGNORECASE)
         debug_info["total_vevents"] = len(raw_events)
@@ -233,10 +272,20 @@ def get_calendar_data_and_debug():
 
         events.sort(key=lambda x: x["start"])
         debug_info["matched_events"] = len(events)
-        print(f"[CALENDAR] {len(events)} citas activas encontradas")
+        
+        # Guardar en caché si obtuvimos resultados exitosos
+        CALENDAR_CACHE["events"] = events
+        CALENDAR_CACHE["debug"] = debug_info
+        CALENDAR_CACHE["timestamp"] = time.time()
+        
+        print(f"[CALENDAR] Éxito: {len(events)} citas activas encontradas ({debug_info['download_duration_seconds']}s)")
     except Exception as e:
         debug_info["error"] = str(e)
         print(f"[CALENDAR] Error: {e}")
+        # Si falló pero tenemos datos previos en caché, los devolvemos para no dejar la pantalla vacía
+        if CALENDAR_CACHE["events"]:
+            print("[CALENDAR] Retornando citas previas desde caché de respaldo")
+            return CALENDAR_CACHE["events"], debug_info
 
     return events, debug_info
 
@@ -257,8 +306,9 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(events).encode())
             return
-        elif self.path == "/api/debug_calendar":
-            events, debug_info = get_calendar_data_and_debug()
+        elif self.path.startswith("/api/debug_calendar"):
+            force = "refresh=true" in self.path
+            events, debug_info = get_calendar_data_and_debug(force_refresh=force)
             debug_info["events"] = events
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
