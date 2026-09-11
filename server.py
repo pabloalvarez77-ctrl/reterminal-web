@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 Servidor para reTerminal E1002
+- Conecta exclusivamente con el feed iCal de Outlook 365 (Bitali)
+- Lee exclusivamente los activos desde tu Google Sheet 'Activos' (ID: 1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4)
+- Sin tickers por defecto: si falla la conexión devuelve lista vacía para mostrar 'Sin información disponible'
 """
 
 import http.server
@@ -13,53 +16,57 @@ from datetime import datetime, timedelta, timezone
 
 PORT = int(os.environ.get("PORT", 5000))
 
-# Google Calendar (iCal público o URL original de suscripción .ics)
+# URL directa oficial de Outlook / Office 365 (Bitali)
 ICAL_URL = os.environ.get(
     "ICAL_URL",
-    "https://calendar.google.com/calendar/ical/gpp5lqo37705ugc0uacmnkgmoi3iqtp1%40import.calendar.google.com/public/basic.ics"
+    "https://outlook.office365.com/owa/calendar/4ebd49ac2ad843ee9cc8519536437d40@bitali.com/dc1dbade01494a418a37e61fda7f3e7b6471521803256032760/calendar.ics"
 )
 
-# Google Sheet 'Activos' de Pablo
+# Google Sheet 'Activos' de Pablo en Drive
 SHEET_ID = "1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
 def get_tickers_from_sheet():
-    default_tickers = [
-        {"sym": "SPY", "label": "SPY", "name": "S&P 500 ETF"},
-        {"sym": "QQQ", "label": "QQQ", "name": "Invesco Nasdaq"},
-        {"sym": "MELI", "label": "MELI", "name": "MercadoLibre"},
-        {"sym": "VIST", "label": "VIST", "name": "Vista Energy"},
-        {"sym": "BRK-B", "label": "BRK.B", "name": "Berkshire Cl B"},
-        {"sym": "BTC-USD", "label": "BTC-USD", "name": "Bitcoin (USD)"}
-    ]
-    if not SHEET_CSV_URL:
-        return default_tickers
+    # Sin tickers por defecto: solo lee de la planilla real
     try:
         req = urllib.request.Request(SHEET_CSV_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=6) as resp:
             lines = resp.read().decode('utf-8', errors='ignore').splitlines()
+
         tickers = []
         for line in lines:
             val = line.split(",")[0].strip().replace('"', '').replace("'", "")
             if not val or val.lower() in ("ticker", "activo", "symbol", "activos"):
                 continue
+            
             display_label = val
             api_sym = val
             if val.upper() == "BRK.B":
                 api_sym = "BRK-B"
             elif val.upper() == "BTC":
                 api_sym = "BTC-USD"
-            tickers.append({"sym": api_sym, "label": display_label, "name": display_label})
+
+            tickers.append({
+                "sym": api_sym,
+                "label": display_label,
+                "name": display_label
+            })
             if len(tickers) == 6:
                 break
-        return tickers if len(tickers) > 0 else default_tickers
-    except Exception:
-        return default_tickers
+
+        return tickers
+    except Exception as e:
+        print(f"[FINANCE] Error al leer Google Sheet: {e}")
+        return []
 
 def fetch_finance_data():
     tickers = get_tickers_from_sheet()
+    if not tickers:
+        return []
+
     results = []
     headers = {'User-Agent': 'Mozilla/5.0'}
+
     for t in tickers:
         sym = t["sym"]
         label = t.get("label", sym)
@@ -73,15 +80,27 @@ def fetch_finance_data():
                 prev_close = meta.get("previousClose", price)
                 short_name = meta.get("shortName", meta.get("symbol", label))
                 change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
+                
                 up = change_pct >= 0
                 sign = "+" if up else ""
                 price_str = f"{price:,.2f}" if price >= 1000 else f"{price:.2f}"
+                
                 results.append({
-                    "sym": label, "name": short_name, "price": price_str,
-                    "change": f"{sign}{change_pct:.2f}%", "up": up
+                    "sym": label,
+                    "name": short_name,
+                    "price": price_str,
+                    "change": f"{sign}{change_pct:.2f}%",
+                    "up": up
                 })
         except Exception:
-            results.append({"sym": label, "name": t.get("name", label), "price": "N/A", "change": "0.00%", "up": True})
+            results.append({
+                "sym": label,
+                "name": label,
+                "price": "N/A",
+                "change": "0.00%",
+                "up": True
+            })
+
     return results
 
 def parse_ical_dt(dt_raw, tz_ba):
@@ -108,7 +127,9 @@ def fetch_calendar_events():
         with urllib.request.urlopen(req, timeout=8) as resp:
             content = resp.read().decode('utf-8', errors='ignore')
 
-        raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', content, re.DOTALL)
+        unfolded = re.sub(r'\r?\n[ \t]', '', content)
+        raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', unfolded, re.DOTALL)
+
         for raw in raw_events:
             summary_m = re.search(r'SUMMARY:(.*?)\r?\n', raw)
             dtstart_m = re.search(r'DTSTART.*?:([0-9TZ]+)', raw)
@@ -116,7 +137,7 @@ def fetch_calendar_events():
             attendees = re.findall(r'ATTENDEE.*?(?:mailto:)?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', raw, re.IGNORECASE)
 
             if summary_m and dtstart_m:
-                summary = summary_m.group(1).strip()
+                summary = summary_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
                 dt_start = parse_ical_dt(dtstart_m.group(1), tz_ba)
                 
                 if dtend_m:
@@ -124,7 +145,7 @@ def fetch_calendar_events():
                 else:
                     dt_end = dt_start + timedelta(minutes=30)
 
-                # Incluye citas en curso o que inicien en las próximas 8 horas
+                # Citas en curso o en las próximas 8 horas
                 if dt_end >= now_ba and dt_start <= window_end_ba:
                     dur_min = int((dt_end - dt_start).total_seconds() / 60)
                     dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
@@ -137,9 +158,9 @@ def fetch_calendar_events():
                     })
 
         events.sort(key=lambda x: x["start"])
-        print(f"[CALENDAR] Éxito: {len(events)} citas en la ventana de 8h")
+        print(f"[CALENDAR] {len(events)} citas en la ventana de 8h")
     except Exception as e:
-        print(f"[CALENDAR] Error al conectar o parsear iCal: {e}")
+        print(f"[CALENDAR] Error al conectar a Outlook 365 iCal: {e}")
 
     return events
 
