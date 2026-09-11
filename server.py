@@ -421,7 +421,8 @@ def render_png_dashboard():
     # Sol de alto contraste con contorno negro
     cx, cy, r = 544, 41, 9
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2)
-    for angle in np.linspace(0, 2*np.pi, 8, endpoint=False):
+    for i in range(8):
+        angle = i * (2 * math.pi / 8)
         x1 = cx + (r + 3) * math.cos(angle)
         y1 = cy + (r + 3) * math.sin(angle)
         x2 = cx + (r + 7) * math.cos(angle)
