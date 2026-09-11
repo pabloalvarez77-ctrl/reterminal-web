@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Servidor para reTerminal E1002 (Compatible con Local y Nube: Render, Railway, etc.)
