@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Servidor para reTerminal E1002 con Server-Side Rendering (SSR)
-- Pre-renderiza en el servidor la hora, clima, cotizaciones de Google Sheets y citas de Outlook
-- Entrega el HTML 100% completo en el primer milisegundo para que las capturas de la reTerminal salgan perfectas
-- Mantiene APIs /api/calendar y /api/finance activas
+- Conecta directamente con el feed iCal de Outlook 365 (Bitali)
+- Filtra reuniones canceladas / eliminadas (STATUS:CANCELLED)
+- Extrae nombres reales de personas (;CN="...") y descarta bots/canales de Teams (19_meeting_...)
+- Pre-renderiza en el servidor para que la reTerminal capture siempre los datos completos
 """
 
 import http.server
@@ -44,6 +45,7 @@ def get_tickers_from_sheet():
             val = line.split(",")[0].strip().replace('"', '').replace("'", "")
             if not val or val.lower() in ("ticker", "activo", "symbol", "activos"):
                 continue
+            
             display_label = val
             api_sym = val
             if val.upper() == "BRK.B":
@@ -115,6 +117,15 @@ def parse_ical_dt(dt_raw, tz_ba):
     else:
         return dt.replace(tzinfo=tz_ba)
 
+def is_clean_human_name(name):
+    if not name:
+        return False
+    lower = name.lower().strip()
+    # Descartar bots, hilos internos de Teams y calendarios de salas/recursos genéricos
+    if any(x in lower for x in ('thread.v2', 'thread.tacv2', '19_meeting', '19:', 'resource.calendar', 'skype')):
+        return False
+    return True
+
 def get_calendar_data_and_debug(force_refresh=False):
     global CALENDAR_CACHE
     now_ts = time.time()
@@ -135,6 +146,7 @@ def get_calendar_data_and_debug(force_refresh=False):
         "http_status": None,
         "content_length": 0,
         "total_vevents": 0,
+        "cancelled_filtered": 0,
         "matched_events": 0,
         "from_cache": False,
         "error": None
@@ -171,29 +183,45 @@ def get_calendar_data_and_debug(force_refresh=False):
         today_code = weekday_map[now_ba.weekday()]
 
         for raw in raw_events:
+            # 1. FILTRAR REUNIONES CANCELADAS O ELIMINADAS (STATUS:CANCELLED)
+            status_m = re.search(r'STATUS:\s*([A-Z]+)', raw, re.IGNORECASE)
+            status = status_m.group(1).upper() if status_m else ""
+            if status == "CANCELLED":
+                debug_info["cancelled_filtered"] += 1
+                continue
+
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
             summary = summary.replace('\\,', ',').replace('\\;', ';')
 
+            # Si el título empieza con Cancelado / Canceled, también se descarta
+            if summary.lower().startswith("cancelado:") or summary.lower().startswith("canceled:"):
+                debug_info["cancelled_filtered"] += 1
+                continue
+
+            # 2. EXTRAER ASISTENTES Y ORGANIZADORES REALES (Sin bots de Teams 19_meeting)
+            people = []
+            person_lines = re.findall(r'(?:ATTENDEE|ORGANIZER)[^\r\n]+', raw, re.IGNORECASE)
+            for pline in person_lines:
+                # Extraer CN (nombre real, con o sin comillas)
+                cn_m = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', pline, re.IGNORECASE)
+                if cn_m:
+                    cand_name = (cn_m.group(1) or cn_m.group(2)).strip()
+                    if is_clean_human_name(cand_name) and cand_name not in people:
+                        people.append(cand_name)
+                else:
+                    # Fallback a email limpio
+                    email_m = re.search(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', pline, re.IGNORECASE)
+                    if email_m:
+                        em = email_m.group(1).strip()
+                        if is_clean_human_name(em):
+                            name_from_email = em.split('@')[0].replace('.', ' ').title()
+                            if name_from_email not in people:
+                                people.append(name_from_email)
+
             dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             rrule_m = re.search(r'RRULE:(.*?)\r?\n', raw, re.IGNORECASE)
-            
-            org_m = re.search(r'ORGANIZER(?:;[^:\r\n]*)?;CN="?([^":;\r\n]+)"?', raw, re.IGNORECASE)
-            org_name = org_m.group(1).strip() if org_m else None
-            
-            att_cns = re.findall(r'ATTENDEE(?:;[^:\r\n]*)?;CN="?([^":;\r\n]+)"?', raw, re.IGNORECASE)
-            emails = re.findall(r'(?:ATTENDEE|ORGANIZER).*?(?:mailto:)?([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', raw, re.IGNORECASE)
-
-            people = []
-            if org_name and org_name not in people:
-                people.append(org_name)
-            for a in att_cns:
-                clean_a = a.strip()
-                if clean_a and clean_a not in people:
-                    people.append(clean_a)
-            if not people and emails:
-                people = [e.split('@')[0].capitalize() for e in emails]
 
             if dtstart_m:
                 dt_start = parse_ical_dt(dtstart_m.group(1), tz_ba)
@@ -206,9 +234,11 @@ def get_calendar_data_and_debug(force_refresh=False):
                 target_start = None
                 target_end = None
 
+                # Caso A: Evento único fechado hoy
                 if dt_end >= now_ba and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
+                # Caso B: Evento recurrente (RRULE)
                 elif rrule_m:
                     rrule_str = rrule_m.group(1).upper()
                     matches_recurrence = False
@@ -246,7 +276,7 @@ def get_calendar_data_and_debug(force_refresh=False):
         CALENDAR_CACHE["events"] = events
         CALENDAR_CACHE["debug"] = debug_info
         CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] {len(events)} citas encontradas en la ventana")
+        print(f"[CALENDAR] {len(events)} citas activas encontradas ({debug_info['cancelled_filtered']} canceladas filtradas)")
     except Exception as e:
         debug_info["error"] = str(e)
         print(f"[CALENDAR] Error: {e}")
@@ -275,25 +305,21 @@ def build_ssr_html(template_content):
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
     
-    # 1. Tiempo y Fecha
     pad = lambda n: str(n).zfill(2)
     time_str = f"{pad(now_ba.hour)}:{pad(now_ba.minute)}"
     window_str = f"{time_str} – {pad(window_end_ba.hour)}:{pad(window_end_ba.minute)}"
     
-    # Días en español
     dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
     meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
     day_str = f"{dias[now_ba.weekday()]}, {now_ba.day} de {meses[now_ba.month - 1]}"
 
-    # 2. Clima
+    # Clima
     wdata = fetch_weather_server()
     temp_cur = "14°"
     desc_cur = "Mayormente despejado"
     range_cur = "Mín: 12° | Máx: 17°"
     sat_temp = "8°/13°"
     sun_temp = "4°/11°"
-    sat_emoji = "⛅"
-    sun_emoji = "☀️"
 
     if wdata:
         try:
@@ -321,7 +347,7 @@ def build_ssr_html(template_content):
         except Exception:
             pass
 
-    # 3. Citas de Calendario
+    # Citas de Calendario
     events, _ = get_calendar_data_and_debug()
     if not events:
         events_html = """
@@ -354,7 +380,7 @@ def build_ssr_html(template_content):
             cards.append(card)
         events_html = "\n".join(cards)
 
-    # 4. Finanzas
+    # Finanzas
     stocks = fetch_finance_data()
     if not stocks:
         stocks_html = """
@@ -430,7 +456,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(debug_info, indent=2).encode())
             return
         elif self.path in ("/", "/index.html"):
-            template_path = "index.html" if os.path.exists("index.html") else "dashboard_perfect.html"
+            template_path = "index.html" if os.path.exists("index.html") else "dashboard_bulletproof.html"
             with open(template_path, "r", encoding="utf-8") as f:
                 template_str = f.read()
 
@@ -445,6 +471,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__ == "__main__":
-    print(f"Servidor activo en el puerto {PORT} con SSR activado")
+    print(f"Servidor activo en el puerto {PORT} con SSR y filtrado de canceladas")
     with socketserver.TCPServer(("", PORT), RequestHandler) as httpd:
         httpd.serve_forever()
