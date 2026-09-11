@@ -2,6 +2,7 @@
 """
 Servidor para reTerminal E1002 con Server-Side Rendering (SSR)
 - Velas japonesas de 60 días para cada activo (Verde #008833, Rojo #D60000 nativos de Spectra 6)
+- Variación porcentual DIARIA calculada respecto al cierre de la sesión anterior (ayer)
 - Íconos de clima de alto contraste (contorno negro nítido de 2px con relleno amarillo puro)
 - Filtrado estricto de reuniones canceladas y visualización estética de agenda
 - Entrega HTML 100% completo al primer milisegundo
@@ -91,9 +92,7 @@ def generate_candles_svg(candles, width=144, height=36):
     usable_h = height - 2 * pad_y
     
     elements = []
-    # Fondo neutro tenue
     elements.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#FAFAFA" rx="3" stroke="#E5E7EB" stroke-width="0.8"/>')
-    # Marca de agua "60D"
     elements.append(f'<text x="4" y="9" font-size="6.5" font-weight="800" fill="#9CA3AF" font-family="sans-serif">60D</text>')
     
     for i, (op, hi, lo, cl) in enumerate(candles):
@@ -110,10 +109,8 @@ def generate_candles_svg(candles, width=144, height=36):
         y_op = height - (pad_y + (op - p_min) / p_range * usable_h)
         y_cl = height - (pad_y + (cl - p_min) / p_range * usable_h)
         
-        # Mecha central
         elements.append(f'<line x1="{cx:.1f}" y1="{y_hi:.1f}" x2="{cx:.1f}" y2="{y_lo:.1f}" stroke="{col}" stroke-width="0.9"/>')
         
-        # Cuerpo de la vela
         body_top = min(y_op, y_cl)
         body_h = max(abs(y_cl - y_op), 1.2)
         body_w = max(step * 0.75, 1.2)
@@ -139,7 +136,6 @@ def fetch_finance_data():
         sym = t["sym"]
         label = t.get("label", sym)
         try:
-            # Pedir 3 meses de velas diarias para asegurar al menos 60 ruedas de negociación
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=3mo"
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=6) as resp:
@@ -148,23 +144,7 @@ def fetch_finance_data():
                 meta = result["meta"]
                 
                 price = meta.get("regularMarketPrice", 0)
-                prev_close = (
-                    meta.get("chartPreviousClose") or 
-                    meta.get("previousClose") or 
-                    meta.get("regularMarketPreviousClose") or 
-                    price
-                )
-                
                 short_name = meta.get("shortName", meta.get("symbol", label))
-                
-                if prev_close and prev_close > 0 and prev_close != price:
-                    change_pct = ((price - prev_close) / prev_close) * 100
-                else:
-                    change_pct = 0.0
-                
-                up = change_pct >= 0
-                sign = "+" if up else ""
-                price_str = f"{price:,.2f}" if price >= 1000 else f"{price:.2f}"
                 
                 # Extraer velas históricas de 60 días
                 quote = result.get("indicators", {}).get("quote", [{}])[0]
@@ -178,7 +158,25 @@ def fetch_finance_data():
                     if None not in (o, h, l, c) and o > 0 and h > 0 and l > 0 and c > 0:
                         valid_candles.append((o, h, l, c))
                 
-                # Tomar los últimos 60 días
+                # VARIACIÓN DIARIA RESPECTO AL CIERRE DE LA RUEDA ANTERIOR (AYER)
+                # En Yahoo Finance con range=3mo, chartPreviousClose es de hace 3 meses.
+                # Para la variación diaria se usa regularMarketPreviousClose o el cierre de la anteúltima vela.
+                prev_close = meta.get("regularMarketPreviousClose")
+                if not prev_close or prev_close <= 0:
+                    if len(valid_candles) >= 2:
+                        prev_close = valid_candles[-2][3]  # Cierre de ayer
+                    else:
+                        prev_close = price
+                
+                if prev_close and prev_close > 0 and prev_close != price:
+                    change_pct = ((price - prev_close) / prev_close) * 100
+                else:
+                    change_pct = 0.0
+                
+                up = change_pct >= 0
+                sign = "+" if up else ""
+                price_str = f"{price:,.2f}" if price >= 1000 else f"{price:.2f}"
+                
                 candles_60d = valid_candles[-60:]
                 chart_svg = generate_candles_svg(candles_60d, width=144, height=36)
                 
@@ -259,6 +257,16 @@ def extract_people_from_vevent(raw):
                     cand = em.split('@')[0].replace('.', ' ').title()
                     if is_clean_human_name(cand) and cand not in people:
                         people.append(cand)
+
+    # 3. Extraer X-MS-OLK-SENDER
+    sender_line = re.search(r'X-MS-OLK-SENDER[^\r\n]+', raw, re.IGNORECASE)
+    if sender_line:
+        line = sender_line.group(0)
+        cn = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', line, re.IGNORECASE)
+        if cn:
+            cand = (cn.group(1) or cn.group(2)).strip().replace('"', '')
+            if is_clean_human_name(cand) and cand not in people:
+                people.append(cand)
 
     return people
 
@@ -362,9 +370,11 @@ def get_calendar_data_and_debug(force_refresh=False):
                 target_start = None
                 target_end = None
 
+                # Caso A: Evento fechado hoy
                 if dt_end >= now_ba and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
+                # Caso B: Evento recurrente
                 elif rrule_m:
                     rrule_str = rrule_m.group(1).upper()
                     matches_recurrence = False
@@ -389,6 +399,7 @@ def get_calendar_data_and_debug(force_refresh=False):
                 if target_start and target_end:
                     dur_min = int((target_end - target_start).total_seconds() / 60)
                     dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
+                    
                     events.append({
                         "title": summary,
                         "start": target_start.strftime("%H:%M"),
@@ -429,17 +440,17 @@ def fetch_weather_server():
 
 def get_high_contrast_weather_svg(code, size=22):
     """Genera íconos de clima con borde negro nítido de 2px y relleno amarillo/azul puro"""
-    if code in (0, 1): # Sol despejado
+    if code in (0, 1):
         return f'''<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <circle cx="12" cy="12" r="5" fill="#FFCC00" stroke="#000000" stroke-width="2"/>
             <path d="M12 1v3M12 20v3M1 12h3M20 12h3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="#000000" stroke-width="2" stroke-linecap="round"/>
         </svg>'''
-    elif code in (2, 3): # Nubes con sol detrás
+    elif code in (2, 3):
         return f'''<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M17 17a5 5 0 0 0-10 0" fill="#FFCC00" stroke="#000000" stroke-width="1.5"/>
             <path d="M17.5 19H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 19z" fill="#FFFFFF" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
         </svg>'''
-    else: # Lluvia / Tormenta
+    else:
         return f'''<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M17.5 15H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 15z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
             <line x1="8" y1="18" x2="8" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
@@ -540,7 +551,7 @@ def build_ssr_html(template_content):
             cards.append(card)
         events_html = "\n".join(cards)
 
-    # Finanzas con velas japonesas
+    # Finanzas con velas y variación diaria calculada
     stocks = fetch_finance_data()
     if not stocks:
         stocks_html = """
@@ -586,7 +597,6 @@ def build_ssr_html(template_content):
     rendered = rendered.replace('<span id="sat-temp">--°/--°</span>', f'<span id="sat-temp">{sat_temp}</span>')
     rendered = rendered.replace('<span id="sun-temp">--°/--°</span>', f'<span id="sun-temp">{sun_temp}</span>')
     
-    # Inyección de íconos de alto contraste
     rendered = rendered.replace('<div class="weather-icon-box" id="weather-icon-box">', f'<div class="weather-icon-box" id="weather-icon-box">{weather_icon_html}<!--')
     rendered = rendered.replace('</div>\n      <div class="weather-temp"', f'--></div>\n      <div class="weather-temp"')
     rendered = rendered.replace('<span id="sat-icon"></span>', f'<span id="sat-icon">{sat_icon_html}</span>')
@@ -640,6 +650,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__ == "__main__":
-    print(f"Servidor activo en el puerto {PORT} con velas de 60 días e íconos de alto contraste")
+    print(f"Servidor activo en el puerto {PORT} con variación diaria corregida")
     with socketserver.TCPServer(("", PORT), RequestHandler) as httpd:
         httpd.serve_forever()
