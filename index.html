@@ -85,20 +85,26 @@
       justify-content: space-between;
       font-size: 11px;
       font-weight: 800;
+      align-items: center;
     }
     .weekend-day-item {
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
     }
 
-    /* BLOQUE 3: CLIMA ACTUAL BUENOS AIRES */
+    /* BLOQUE 3: CLIMA ACTUAL BUENOS AIRES (ALTO CONTRASTE) */
     .weather-current-box {
       display: flex;
       align-items: center;
       gap: 10px;
       min-width: 240px;
       justify-content: flex-end;
+    }
+    .weather-icon-box {
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     .weather-temp {
       font-size: 28px;
@@ -207,7 +213,7 @@
       text-overflow: ellipsis;
       line-height: 1.15;
     }
-    .event-attendees {
+    .event-subrow {
       display: flex;
       align-items: center;
       gap: 4px;
@@ -234,30 +240,78 @@
     .empty-state-title { font-size: 13px; font-weight: 800; }
     .empty-state-sub { font-size: 11px; font-weight: 600; color: #333333; }
 
-    /* FINANZAS */
+    /* FINANZAS CON VELAS 60 DÍAS */
     .stocks-grid {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      flex: 1;
     }
     .stock-card {
-      border: 2px solid #000000; border-radius: 4px; padding: 5px 7px;
-      display: flex; flex-direction: column; justify-content: space-between; height: 98px; background: #FFFFFF;
+      border: 2px solid #000000;
+      border-radius: 4px;
+      padding: 4px 6px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      height: 110px;
+      background: #FFFFFF;
     }
-    .stock-card-top { display: flex; justify-content: space-between; align-items: center; }
-    .stock-sym { font-size: 13px; font-weight: 800; color: #000000; }
+    .stock-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .stock-sym {
+      font-size: 12px;
+      font-weight: 800;
+      color: #000000;
+    }
     .badge-pill {
-      font-size: 10px; font-weight: 800; padding: 1px 4px; border-radius: 3px; color: #FFFFFF;
-      display: inline-flex; align-items: center; gap: 2px;
+      font-size: 9.5px;
+      font-weight: 800;
+      padding: 1px 4px;
+      border-radius: 3px;
+      color: #FFFFFF;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
     }
     .badge-up { background-color: #008833; }
     .badge-down { background-color: #D60000; }
-    .stock-val { font-size: 17px; font-weight: 800; color: #000000; margin: 1px 0; }
-    .stock-desc { font-size: 10px; font-weight: 700; color: #000000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-top: 1px solid #000000; padding-top: 2px; }
+    .stock-val {
+      font-size: 15px;
+      font-weight: 800;
+      color: #000000;
+      margin: 1px 0;
+      line-height: 1.1;
+    }
+    .stock-chart {
+      width: 100%;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border-radius: 3px;
+      background: #FAFAFA;
+    }
+    .stock-desc {
+      font-size: 9px;
+      font-weight: 700;
+      color: #000000;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border-top: 1px solid #000000;
+      padding-top: 2px;
+    }
 
     .icon {
       width: 14px; height: 14px; stroke: currentColor; stroke-width: 2; stroke-linecap: round;
       stroke-linejoin: round; fill: none; display: inline-block; vertical-align: middle;
     }
-    .icon-lg { width: 20px; height: 20px; }
+    .icon-lg { width: 22px; height: 22px; }
   </style>
 </head>
 <body>
@@ -281,13 +335,19 @@
         PRONÓSTICO FIN DE SEMANA
       </div>
       <div class="weekend-days">
-        <div class="weekend-day-item"><span>SÁB:</span> <span id="sat-temp">--°/--°</span> <span id="sat-icon">⛅</span></div>
-        <div class="weekend-day-item"><span>DOM:</span> <span id="sun-temp">--°/--°</span> <span id="sun-icon">☀️</span></div>
+        <div class="weekend-day-item"><span>SÁB:</span> <span id="sat-temp">--°/--°</span> <span id="sat-icon"></span></div>
+        <div class="weekend-day-item"><span>DOM:</span> <span id="sun-temp">--°/--°</span> <span id="sun-icon"></span></div>
       </div>
     </div>
 
+    <!-- CLIMA ACTUAL CON ALTO CONTRASTE (SOL AMARILLO CON BORDE NEGRO NÍTIDO) -->
     <div class="weather-current-box">
-      <svg class="icon icon-lg" viewBox="0 0 24 24" style="stroke: #FFCC00; fill: #FFCC00;"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line></svg>
+      <div class="weather-icon-box" id="weather-icon-box">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="5" fill="#FFCC00" stroke="#000000" stroke-width="2"/>
+          <path d="M12 1v3M12 20v3M1 12h3M20 12h3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="#000000" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
       <div class="weather-temp" id="weather-temp">--°</div>
       <div class="weather-meta">
         <div class="weather-city">BUENOS AIRES</div>
@@ -352,9 +412,7 @@
           timeZone: 'America/Argentina/Buenos_Aires',
           weekday: 'long', day: 'numeric', month: 'long'
         });
-      } catch (err) {
-        console.error(err);
-      }
+      } catch (err) {}
     }
 
     // 2. CITAS REALES
@@ -377,8 +435,16 @@
         const card = document.createElement('div');
         card.className = 'event-card' + (isRoomy ? ' roomy' : '');
         
-        const attendeeText = evt.attendees && evt.attendees.length > 0
-          ? evt.attendees.join(', ') : 'Sin invitados registrados';
+        let subText = '';
+        if (evt.attendees && evt.attendees.length > 0) {
+          subText = `<svg class="icon" viewBox="0 0 24 24" style="stroke: #000000; min-width: 12px; width:12px; height:12px;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg><span>${evt.attendees.join(', ')}</span>`;
+        } else if (evt.location) {
+          subText = `<svg class="icon" viewBox="0 0 24 24" style="stroke: #000000; min-width: 12px; width:12px; height:12px;"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg><span>${evt.location}</span>`;
+        } else if (evt.title.toLowerCase().includes('almuerzo')) {
+          subText = `<span>🍽️ Almuerzo</span>`;
+        } else {
+          subText = `<span>📅 Reunión agendada</span>`;
+        }
 
         card.innerHTML = `
           <div class="event-top">
@@ -389,15 +455,12 @@
             <span class="event-duration">${evt.duration || '30m'}</span>
           </div>
           <div class="event-title">${evt.title}</div>
-          <div class="event-attendees">
-            <svg class="icon" viewBox="0 0 24 24" style="stroke: #000000; min-width: 12px; width:12px; height:12px;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
-            <span class="attendees-names">${attendeeText}</span>
-          </div>`;
+          <div class="event-subrow">${subText}</div>`;
         container.appendChild(card);
       });
     }
 
-    // 3. FINANZAS REALES
+    // 3. FINANZAS REALES CON GRÁFICO DE VELAS DE 60 DÍAS
     function renderFinance(items) {
       const grid = document.getElementById('stocks-grid');
       if (!items || items.length === 0) {
@@ -421,8 +484,8 @@
         const isUp = st.up;
         const badgeClass = isUp ? 'badge-up' : 'badge-down';
         const arrowSvg = isUp
-          ? '<svg class="icon" style="width:10px;height:10px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>'
-          : '<svg class="icon" style="width:10px;height:10px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+          ? '<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>'
+          : '<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>';
 
         card.innerHTML = `
           <div class="stock-card-top">
@@ -430,12 +493,34 @@
             <span class="badge-pill ${badgeClass}">${arrowSvg} ${st.change}</span>
           </div>
           <div class="stock-val">$${st.price}</div>
+          <div class="stock-chart">${st.chart_svg || ''}</div>
           <div class="stock-desc">${st.name}</div>`;
         grid.appendChild(card);
       });
     }
 
-    // 4. CLIMA OPEN-METEO
+    // 4. CLIMA CON ÍCONOS DE ALTO CONTRASTE (BORDE NEGRO Y RELLENO AMARILLO/AZUL)
+    function createHighContrastIcon(code, size=20) {
+      if (code === 0 || code === 1) { // Despejado
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="5" fill="#FFCC00" stroke="#000000" stroke-width="2"/>
+          <path d="M12 1v3M12 20v3M1 12h3M20 12h3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="#000000" stroke-width="2" stroke-linecap="round"/>
+        </svg>`;
+      } else if (code === 2 || code === 3) { // Nubes / Parcial
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M17 17a5 5 0 0 0-10 0" fill="#FFCC00" stroke="#000000" stroke-width="1.5"/>
+          <path d="M17.5 19H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 19z" fill="#FFFFFF" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
+        </svg>`;
+      } else { // Lluvia / Tormenta
+        return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M17.5 15H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 15z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+          <line x1="8" y1="18" x2="8" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="12" y1="18" x2="12" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="16" y1="18" x2="16" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>`;
+      }
+    }
+
     async function fetchWeather() {
       try {
         const url = 'https://api.open-meteo.com/v1/forecast?latitude=-34.6037&longitude=-58.3816&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires';
@@ -453,20 +538,24 @@
         document.getElementById('weather-desc').textContent = desc;
         document.getElementById('weather-range').textContent = `Mín: ${Math.round(data.daily.temperature_2m_min[0])}° | Máx: ${Math.round(data.daily.temperature_2m_max[0])}°`;
 
+        document.getElementById('weather-icon-box').innerHTML = createHighContrastIcon(code, 26);
+
         const times = data.daily.time;
         for (let i = 0; i < times.length; i++) {
           const day = new Date(times[i] + 'T12:00:00').getDay();
           if (day === 6) {
             document.getElementById('sat-temp').textContent = `${Math.round(data.daily.temperature_2m_min[i])}°/${Math.round(data.daily.temperature_2m_max[i])}°`;
+            document.getElementById('sat-icon').innerHTML = createHighContrastIcon(data.daily.weather_code[i], 18);
           }
           if (day === 0) {
             document.getElementById('sun-temp').textContent = `${Math.round(data.daily.temperature_2m_min[i])}°/${Math.round(data.daily.temperature_2m_max[i])}°`;
+            document.getElementById('sun-icon').innerHTML = createHighContrastIcon(data.daily.weather_code[i], 18);
           }
         }
       } catch (err) {}
     }
 
-    // 5. ACTUALIZACIÓN EN VIVO (Nunca borra el contenido pre-renderizado si no hay datos nuevos)
+    // 5. ACTUALIZACIÓN EN VIVO
     async function syncWithServer() {
       try {
         const resCal = await fetch('/api/calendar');
@@ -489,8 +578,6 @@
       } catch (e) {}
     }
 
-    // INICIALIZACIÓN SIN BORRADO DE SSR
-    // No llamamos a renderEvents([]) ni renderFinance([]) para no borrar el contenido inyectado por el servidor
     updateClock();
     syncWithServer();
 

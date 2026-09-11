@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Servidor para reTerminal E1002 con Server-Side Rendering (SSR)
-- Filtra eventos cancelados (STATUS:CANCELLED) y eventos descartados (X-MICROSOFT-CDO-BUSYSTATUS:FREE)
-- Extracción avanzada de nombres reales (CN en ORGANIZER, ATTENDEE, X-MS-OLK-SENDER y LOCATION)
-- Descarte de identificadores de bots/canales de Teams (19_meeting, @thread.v2)
-- Entrega HTML pre-renderizado completo al instante
+- Velas japonesas de 60 días para cada activo (Verde #008833, Rojo #D60000 nativos de Spectra 6)
+- Íconos de clima de alto contraste (contorno negro nítido de 2px con relleno amarillo puro)
+- Filtrado estricto de reuniones canceladas y visualización estética de agenda
+- Entrega HTML 100% completo al primer milisegundo
 """
 
 import http.server
@@ -28,6 +28,9 @@ ICAL_URL = os.environ.get(
 # Google Sheet 'Activos' de Pablo
 SHEET_ID = "1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+
+# Títulos de reuniones canceladas/eliminadas para exclusión inmediata
+EXCLUDED_TITLES = ["proyecto 90k", "graciela maestra pedro", "cancelado", "canceled", "rechazado"]
 
 # Cachés en memoria
 CALENDAR_CACHE = {"events": [], "debug": {}, "timestamp": 0, "ttl": 300}
@@ -61,6 +64,65 @@ def get_tickers_from_sheet():
         print(f"[FINANCE] Error al leer Google Sheet: {e}")
         return []
 
+def generate_candles_svg(candles, width=144, height=36):
+    """
+    Genera un SVG con 60 velas japonesas (OHLC)
+    Verde primario: #008833
+    Rojo primario: #D60000
+    """
+    if not candles or len(candles) < 2:
+        return f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}"><rect width="{width}" height="{height}" fill="#FAFAFA" rx="3"/></svg>'
+    
+    all_lows = [c[2] for c in candles if c[2] is not None and c[2] > 0]
+    all_highs = [c[3] for c in candles if c[3] is not None and c[3] > 0]
+    if not all_lows or not all_highs:
+        return f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}"><rect width="{width}" height="{height}" fill="#FAFAFA" rx="3"/></svg>'
+        
+    p_min = min(all_lows)
+    p_max = max(all_highs)
+    p_range = p_max - p_min if p_max > p_min else 1.0
+    
+    n = len(candles)
+    pad_x = 3.0
+    usable_w = width - 2 * pad_x
+    step = usable_w / max(n - 1, 1)
+    
+    pad_y = 2.5
+    usable_h = height - 2 * pad_y
+    
+    elements = []
+    # Fondo neutro tenue
+    elements.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="#FAFAFA" rx="3" stroke="#E5E7EB" stroke-width="0.8"/>')
+    # Marca de agua "60D"
+    elements.append(f'<text x="4" y="9" font-size="6.5" font-weight="800" fill="#9CA3AF" font-family="sans-serif">60D</text>')
+    
+    for i, (op, hi, lo, cl) in enumerate(candles):
+        if None in (op, hi, lo, cl) or op <= 0 or cl <= 0:
+            continue
+            
+        is_up = cl >= op
+        col = "#008833" if is_up else "#D60000"
+        
+        cx = pad_x + i * step
+        
+        y_hi = height - (pad_y + (hi - p_min) / p_range * usable_h)
+        y_lo = height - (pad_y + (lo - p_min) / p_range * usable_h)
+        y_op = height - (pad_y + (op - p_min) / p_range * usable_h)
+        y_cl = height - (pad_y + (cl - p_min) / p_range * usable_h)
+        
+        # Mecha central
+        elements.append(f'<line x1="{cx:.1f}" y1="{y_hi:.1f}" x2="{cx:.1f}" y2="{y_lo:.1f}" stroke="{col}" stroke-width="0.9"/>')
+        
+        # Cuerpo de la vela
+        body_top = min(y_op, y_cl)
+        body_h = max(abs(y_cl - y_op), 1.2)
+        body_w = max(step * 0.75, 1.2)
+        bx = cx - body_w / 2.0
+        
+        elements.append(f'<rect x="{bx:.1f}" y="{body_top:.1f}" width="{body_w:.1f}" height="{body_h:.1f}" fill="{col}" stroke="{col}" stroke-width="0.3"/>')
+        
+    return f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">{"".join(elements)}</svg>'
+
 def fetch_finance_data():
     now_ts = time.time()
     if FINANCE_CACHE["data"] and (now_ts - FINANCE_CACHE["timestamp"]) < FINANCE_CACHE["ttl"]:
@@ -77,27 +139,59 @@ def fetch_finance_data():
         sym = t["sym"]
         label = t.get("label", sym)
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=1d"
+            # Pedir 3 meses de velas diarias para asegurar al menos 60 ruedas de negociación
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=3mo"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=6) as resp:
                 data = json.loads(resp.read().decode())
-                meta = data["chart"]["result"][0]["meta"]
+                result = data["chart"]["result"][0]
+                meta = result["meta"]
+                
                 price = meta.get("regularMarketPrice", 0)
-                prev_close = meta.get("previousClose", price)
+                prev_close = (
+                    meta.get("chartPreviousClose") or 
+                    meta.get("previousClose") or 
+                    meta.get("regularMarketPreviousClose") or 
+                    price
+                )
+                
                 short_name = meta.get("shortName", meta.get("symbol", label))
-                change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0.0
+                
+                if prev_close and prev_close > 0 and prev_close != price:
+                    change_pct = ((price - prev_close) / prev_close) * 100
+                else:
+                    change_pct = 0.0
                 
                 up = change_pct >= 0
                 sign = "+" if up else ""
                 price_str = f"{price:,.2f}" if price >= 1000 else f"{price:.2f}"
                 
+                # Extraer velas históricas de 60 días
+                quote = result.get("indicators", {}).get("quote", [{}])[0]
+                opens = quote.get("open", [])
+                highs = quote.get("high", [])
+                lows = quote.get("low", [])
+                closes = quote.get("close", [])
+                
+                valid_candles = []
+                for o, h, l, c in zip(opens, highs, lows, closes):
+                    if None not in (o, h, l, c) and o > 0 and h > 0 and l > 0 and c > 0:
+                        valid_candles.append((o, h, l, c))
+                
+                # Tomar los últimos 60 días
+                candles_60d = valid_candles[-60:]
+                chart_svg = generate_candles_svg(candles_60d, width=144, height=36)
+                
                 results.append({
                     "sym": label, "name": short_name, "price": price_str,
-                    "change": f"{sign}{change_pct:.2f}%", "up": up
+                    "change": f"{sign}{change_pct:.2f}%", "up": up,
+                    "chart_svg": chart_svg
                 })
-        except Exception:
+        except Exception as err:
+            print(f"[FINANCE] Error con {sym}: {err}")
             results.append({
-                "sym": label, "name": label, "price": "N/A", "change": "0.00%", "up": True
+                "sym": label, "name": label, "price": "N/A", "change": "0.00%", "up": True,
+                "chart_svg": ""
             })
 
     FINANCE_CACHE["data"] = results
@@ -121,43 +215,50 @@ def is_clean_human_name(name):
     if not name:
         return False
     lower = name.lower().strip()
-    # Descartar bots, hilos internos de Teams y calendarios de salas/recursos
-    bad_tokens = ('thread.', '19_meeting', '19:', 'resource.calendar', 'skype', 'microsoft teams', 'reunión de microsoft', 'sala piero', 'reunion de teams')
+    bad_tokens = (
+        'thread.', '19_meeting', '19:', 'resource.calendar', 'skype',
+        'microsoft teams', 'reunión de microsoft', 'teams meeting'
+    )
     if any(x in lower for x in bad_tokens):
-        return False
-    # Descartar si es un email crudo
-    if '@' in lower and ('.com' in lower or '.ar' in lower):
         return False
     return len(name.strip()) >= 2
 
 def extract_people_from_vevent(raw):
     people = []
 
-    # 1. Buscar nombres en ORGANIZER, ATTENDEE, X-MS-OLK-SENDER
-    person_lines = re.findall(r'(?:ATTENDEE|ORGANIZER|X-MS-OLK-SENDER)[^\r\n]+', raw, re.IGNORECASE)
-    for pline in person_lines:
-        cn_m = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', pline, re.IGNORECASE)
-        if cn_m:
-            cand = (cn_m.group(1) or cn_m.group(2)).strip()
+    # 1. Extraer ORGANIZER
+    org_line = re.search(r'ORGANIZER[^\r\n]+', raw, re.IGNORECASE)
+    if org_line:
+        line = org_line.group(0)
+        cn = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', line, re.IGNORECASE)
+        if cn:
+            cand = (cn.group(1) or cn.group(2)).strip().replace('"', '')
             if is_clean_human_name(cand) and cand not in people:
                 people.append(cand)
         else:
-            email_m = re.search(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', pline, re.IGNORECASE)
-            if email_m:
-                em = email_m.group(1).strip()
+            mail = re.search(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', line, re.IGNORECASE)
+            if mail:
+                em = mail.group(1).strip()
                 if is_clean_human_name(em):
                     cand = em.split('@')[0].replace('.', ' ').title()
-                    if cand not in people:
+                    if is_clean_human_name(cand) and cand not in people:
                         people.append(cand)
 
-    # 2. Buscar si el convocante está incluido en LOCATION (muy común en Teams/Piero: "Reunión Teams; Sala Piero; Juan Rzeznik")
-    loc_m = re.search(r'LOCATION(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
-    if loc_m:
-        parts = loc_m.group(1).split(';')
-        for p in parts:
-            cand = p.strip()
-            if is_clean_human_name(cand) and len(cand) > 3 and cand not in people:
+    # 2. Extraer ATTENDEE
+    for line in re.findall(r'ATTENDEE[^\r\n]+', raw, re.IGNORECASE):
+        cn = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', line, re.IGNORECASE)
+        if cn:
+            cand = (cn.group(1) or cn.group(2)).strip().replace('"', '')
+            if is_clean_human_name(cand) and cand not in people:
                 people.append(cand)
+        else:
+            mail = re.search(r'mailto:([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)', line, re.IGNORECASE)
+            if mail:
+                em = mail.group(1).strip()
+                if is_clean_human_name(em):
+                    cand = em.split('@')[0].replace('.', ' ').title()
+                    if is_clean_human_name(cand) and cand not in people:
+                        people.append(cand)
 
     return people
 
@@ -190,7 +291,6 @@ def get_calendar_data_and_debug(force_refresh=False):
     events = []
 
     try:
-        t_start = time.time()
         req = urllib.request.Request(
             ICAL_URL,
             headers={
@@ -218,7 +318,7 @@ def get_calendar_data_and_debug(force_refresh=False):
         today_code = weekday_map[now_ba.weekday()]
 
         for raw in raw_events:
-            # 1. FILTRAR REUNIONES CANCELADAS (STATUS:CANCELLED) O ELIMINADAS (BUSYSTATUS:FREE)
+            # 1. FILTRAR CANCELADAS O LIBRES
             status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
             status = status_m.group(1).upper() if status_m else ""
             
@@ -233,12 +333,19 @@ def get_calendar_data_and_debug(force_refresh=False):
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
             summary = summary.replace('\\,', ',').replace('\\;', ';')
 
-            if summary.lower().startswith("cancelado:") or summary.lower().startswith("canceled:"):
+            if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
                 debug_info["cancelled_filtered"] += 1
                 continue
 
-            # 2. EXTRAER PERSONAS REALES (Sin bots ni cadenas raras)
+            # 2. EXTRAER PERSONAS REALES
             people = extract_people_from_vevent(raw)
+
+            # 3. EXTRAER UBICACIÓN
+            loc_m = re.search(r'LOCATION(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
+            loc_str = ""
+            if loc_m:
+                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
+                loc_str = loc_raw.replace("Reunión de Microsoft Teams", "Microsoft Teams").strip("; ")
 
             dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
@@ -255,11 +362,9 @@ def get_calendar_data_and_debug(force_refresh=False):
                 target_start = None
                 target_end = None
 
-                # Caso A: Evento fechado hoy
                 if dt_end >= now_ba and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
-                # Caso B: Evento recurrente
                 elif rrule_m:
                     rrule_str = rrule_m.group(1).upper()
                     matches_recurrence = False
@@ -289,7 +394,8 @@ def get_calendar_data_and_debug(force_refresh=False):
                         "start": target_start.strftime("%H:%M"),
                         "end": target_end.strftime("%H:%M"),
                         "duration": dur_str,
-                        "attendees": people
+                        "attendees": people,
+                        "location": loc_str
                     })
 
         events.sort(key=lambda x: x["start"])
@@ -297,7 +403,7 @@ def get_calendar_data_and_debug(force_refresh=False):
         CALENDAR_CACHE["events"] = events
         CALENDAR_CACHE["debug"] = debug_info
         CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] {len(events)} citas activas encontradas ({debug_info['cancelled_filtered']} canceladas/libres ignoradas)")
+        print(f"[CALENDAR] {len(events)} citas activas encontradas ({debug_info['cancelled_filtered']} canceladas/excluidas)")
     except Exception as e:
         debug_info["error"] = str(e)
         print(f"[CALENDAR] Error: {e}")
@@ -321,6 +427,26 @@ def fetch_weather_server():
     except Exception:
         return None
 
+def get_high_contrast_weather_svg(code, size=22):
+    """Genera íconos de clima con borde negro nítido de 2px y relleno amarillo/azul puro"""
+    if code in (0, 1): # Sol despejado
+        return f'''<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="5" fill="#FFCC00" stroke="#000000" stroke-width="2"/>
+            <path d="M12 1v3M12 20v3M1 12h3M20 12h3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="#000000" stroke-width="2" stroke-linecap="round"/>
+        </svg>'''
+    elif code in (2, 3): # Nubes con sol detrás
+        return f'''<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M17 17a5 5 0 0 0-10 0" fill="#FFCC00" stroke="#000000" stroke-width="1.5"/>
+            <path d="M17.5 19H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 19z" fill="#FFFFFF" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
+        </svg>'''
+    else: # Lluvia / Tormenta
+        return f'''<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M17.5 15H9a6 6 0 1 1 5.9-4.8A4.5 4.5 0 1 1 17.5 15z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+            <line x1="8" y1="18" x2="8" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="12" y1="18" x2="12" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
+            <line x1="16" y1="18" x2="16" y2="21" stroke="#0044CC" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>'''
+
 def build_ssr_html(template_content):
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
@@ -341,6 +467,9 @@ def build_ssr_html(template_content):
     range_cur = "Mín: 12° | Máx: 17°"
     sat_temp = "8°/13°"
     sun_temp = "4°/11°"
+    weather_icon_html = get_high_contrast_weather_svg(1, 26)
+    sat_icon_html = get_high_contrast_weather_svg(2, 18)
+    sun_icon_html = get_high_contrast_weather_svg(0, 18)
 
     if wdata:
         try:
@@ -354,6 +483,8 @@ def build_ssr_html(template_content):
             elif 80 <= code <= 82: desc_cur = "Chaparrones"
             elif code >= 95: desc_cur = "Tormenta"
             
+            weather_icon_html = get_high_contrast_weather_svg(code, 26)
+
             min_c = round(wdata["daily"]["temperature_2m_min"][0])
             max_c = round(wdata["daily"]["temperature_2m_max"][0])
             range_cur = f"Mín: {min_c}° | Máx: {max_c}°"
@@ -363,8 +494,10 @@ def build_ssr_html(template_content):
                 d = datetime.strptime(ts, "%Y-%m-%d")
                 if d.weekday() == 5:
                     sat_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                    sat_icon_html = get_high_contrast_weather_svg(wdata["daily"]["weather_code"][i], 18)
                 if d.weekday() == 6:
                     sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                    sun_icon_html = get_high_contrast_weather_svg(wdata["daily"]["weather_code"][i], 18)
         except Exception:
             pass
 
@@ -382,7 +515,16 @@ def build_ssr_html(template_content):
         cards = []
         for evt in events[:6]:
             roomy_cls = " roomy" if is_roomy else ""
-            att_text = ", ".join(evt.get("attendees", [])) if evt.get("attendees") else "Compromiso personal"
+            
+            if evt.get("attendees"):
+                sub_text = f"""<svg class="icon" viewBox="0 0 24 24" style="stroke: #000000; min-width: 12px; width:12px; height:12px;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg><span>{", ".join(evt["attendees"])}</span>"""
+            elif evt.get("location"):
+                sub_text = f"""<svg class="icon" viewBox="0 0 24 24" style="stroke: #000000; min-width: 12px; width:12px; height:12px;"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg><span>{evt["location"]}</span>"""
+            elif "almuerzo" in evt.get("title", "").lower():
+                sub_text = """<span>🍽️ Almuerzo</span>"""
+            else:
+                sub_text = """<span>📅 Reunión agendada</span>"""
+
             card = f"""
             <div class="event-card{roomy_cls}">
               <div class="event-top">
@@ -393,15 +535,12 @@ def build_ssr_html(template_content):
                 <span class="event-duration">{evt.get('duration', '30m')}</span>
               </div>
               <div class="event-title">{evt['title']}</div>
-              <div class="event-attendees">
-                <svg class="icon" viewBox="0 0 24 24" style="stroke: #000000; min-width: 12px; width:12px; height:12px;"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
-                <span class="attendees-names">{att_text}</span>
-              </div>
+              <div class="event-subrow">{sub_text}</div>
             </div>"""
             cards.append(card)
         events_html = "\n".join(cards)
 
-    # Finanzas
+    # Finanzas con velas japonesas
     stocks = fetch_finance_data()
     if not stocks:
         stocks_html = """
@@ -419,7 +558,9 @@ def build_ssr_html(template_content):
         for st in stocks:
             is_up = st.get("up", True)
             badge_cls = "badge-up" if is_up else "badge-down"
-            arrow = """<svg class="icon" style="width:10px;height:10px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>""" if is_up else """<svg class="icon" style="width:10px;height:10px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>"""
+            arrow = """<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="18 15 12 9 6 15"></polyline></svg>""" if is_up else """<svg class="icon" style="width:9px;height:9px;stroke:#FFFFFF;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>"""
+            chart_svg = st.get("chart_svg", "")
+            
             card = f"""
             <div class="stock-card">
               <div class="stock-card-top">
@@ -427,6 +568,7 @@ def build_ssr_html(template_content):
                 <span class="badge-pill {badge_cls}">{arrow} {st['change']}</span>
               </div>
               <div class="stock-val">${st['price']}</div>
+              <div class="stock-chart">{chart_svg}</div>
               <div class="stock-desc">{st['name']}</div>
             </div>"""
             cards.append(card)
@@ -443,6 +585,12 @@ def build_ssr_html(template_content):
     rendered = rendered.replace('<div id="weather-range">Mín: --° | Máx: --°</div>', f'<div id="weather-range">{range_cur}</div>')
     rendered = rendered.replace('<span id="sat-temp">--°/--°</span>', f'<span id="sat-temp">{sat_temp}</span>')
     rendered = rendered.replace('<span id="sun-temp">--°/--°</span>', f'<span id="sun-temp">{sun_temp}</span>')
+    
+    # Inyección de íconos de alto contraste
+    rendered = rendered.replace('<div class="weather-icon-box" id="weather-icon-box">', f'<div class="weather-icon-box" id="weather-icon-box">{weather_icon_html}<!--')
+    rendered = rendered.replace('</div>\n      <div class="weather-temp"', f'--></div>\n      <div class="weather-temp"')
+    rendered = rendered.replace('<span id="sat-icon"></span>', f'<span id="sat-icon">{sat_icon_html}</span>')
+    rendered = rendered.replace('<span id="sun-icon"></span>', f'<span id="sun-icon">{sun_icon_html}</span>')
 
     rendered = rendered.replace('<div class="events-container" id="events-container"></div>', f'<div class="events-container" id="events-container">{events_html}</div>')
     rendered = rendered.replace('<div class="stocks-grid" id="stocks-grid"></div>', f'<div class="stocks-grid" id="stocks-grid">{stocks_html}</div>')
@@ -477,7 +625,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(debug_info, indent=2).encode())
             return
         elif self.path in ("/", "/index.html"):
-            template_path = "index.html" if os.path.exists("index.html") else "dashboard_bulletproof.html"
+            template_path = "index.html" if os.path.exists("index.html") else "dashboard_perfect.html"
             with open(template_path, "r", encoding="utf-8") as f:
                 template_str = f.read()
 
@@ -492,6 +640,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__ == "__main__":
-    print(f"Servidor activo en el puerto {PORT} con SSR y filtrado de BUSYSTATUS:FREE")
+    print(f"Servidor activo en el puerto {PORT} con velas de 60 días e íconos de alto contraste")
     with socketserver.TCPServer(("", PORT), RequestHandler) as httpd:
         httpd.serve_forever()
