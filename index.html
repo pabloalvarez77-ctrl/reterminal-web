@@ -160,8 +160,6 @@
       overflow: hidden;
       justify-content: flex-start;
     }
-    
-    /* TARJETA DE CITA (Adaptable a 1 hasta 6 citas en 340px) */
     .event-card {
       border: 2px solid #000000;
       border-left: 6px solid #0044CC;
@@ -325,26 +323,43 @@
   </div>
 
   <script>
-    // 1. RELOJ Y FECHA
+    // 1. RELOJ ANCLADO ESTRICTAMENTE A BUENOS AIRES
     function updateClock() {
-      const now = new Date();
-      const endWindow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-      const pad = (n) => String(n).padStart(2, '0');
-      const tStart = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-      const tEnd = `${pad(endWindow.getHours())}:${pad(endWindow.getMinutes())}`;
+      try {
+        const now = new Date();
+        const formatter = new Intl.DateTimeFormat('es-AR', {
+          timeZone: 'America/Argentina/Buenos_Aires',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        });
+        const parts = formatter.formatToParts(now);
+        let h = '00', m = '00';
+        for (const p of parts) {
+          if (p.type === 'hour') h = p.value;
+          if (p.type === 'minute') m = p.value;
+        }
 
-      document.getElementById('header-time').textContent = tStart;
-      document.getElementById('window-range').textContent = `${tStart} – ${tEnd}`;
-      document.getElementById('header-day').textContent = now.toLocaleDateString('es-AR', {
-        weekday: 'long', day: 'numeric', month: 'long'
-      });
+        const startH = parseInt(h, 10);
+        const endH = String((startH + 8) % 24).padStart(2, '0');
+        const tStart = `${h}:${m}`;
+        const tEnd = `${endH}:${m}`;
+
+        document.getElementById('header-time').textContent = tStart;
+        document.getElementById('window-range').textContent = `${tStart} – ${tEnd}`;
+
+        document.getElementById('header-day').textContent = now.toLocaleDateString('es-AR', {
+          timeZone: 'America/Argentina/Buenos_Aires',
+          weekday: 'long', day: 'numeric', month: 'long'
+        });
+      } catch (err) {
+        console.error(err);
+      }
     }
 
-    // 2. CITAS REALES (Hasta 6 citas ajustadas perfectamente a 480px)
+    // 2. CITAS REALES
     function renderEvents(events) {
       const container = document.getElementById('events-container');
-      container.innerHTML = '';
-
       if (!events || events.length === 0) {
         container.innerHTML = `
           <div class="empty-state">
@@ -355,6 +370,7 @@
         return;
       }
 
+      container.innerHTML = '';
       const isRoomy = events.length <= 4;
 
       events.slice(0, 6).forEach(evt => {
@@ -384,8 +400,6 @@
     // 3. FINANZAS REALES
     function renderFinance(items) {
       const grid = document.getElementById('stocks-grid');
-      grid.innerHTML = '';
-
       if (!items || items.length === 0) {
         grid.innerHTML = `
           <div class="empty-state" style="grid-column: span 2;">
@@ -400,6 +414,7 @@
         return;
       }
 
+      grid.innerHTML = '';
       items.forEach(st => {
         const card = document.createElement('div');
         card.className = 'stock-card';
@@ -451,38 +466,32 @@
       } catch (err) {}
     }
 
-    // 5. CONSULTA AL SERVIDOR
+    // 5. ACTUALIZACIÓN EN VIVO (Nunca borra el contenido pre-renderizado si no hay datos nuevos)
     async function syncWithServer() {
       try {
         const resCal = await fetch('/api/calendar');
         if (resCal.ok) {
           const evts = await resCal.json();
-          renderEvents(evts);
-        } else {
-          renderEvents([]);
+          if (evts && evts.length > 0) {
+            renderEvents(evts);
+          }
         }
-      } catch (e) {
-        renderEvents([]);
-      }
+      } catch (e) {}
 
       try {
         const resFin = await fetch('/api/finance');
         if (resFin.ok) {
           const stocks = await resFin.json();
-          renderFinance(stocks);
-        } else {
-          renderFinance([]);
+          if (stocks && stocks.length > 0) {
+            renderFinance(stocks);
+          }
         }
-      } catch (e) {
-        renderFinance([]);
-      }
+      } catch (e) {}
     }
 
-    // INICIALIZACIÓN
+    // INICIALIZACIÓN SIN BORRADO DE SSR
+    // No llamamos a renderEvents([]) ni renderFinance([]) para no borrar el contenido inyectado por el servidor
     updateClock();
-    renderEvents([]);
-    renderFinance([]);
-    fetchWeather();
     syncWithServer();
 
     setInterval(updateClock, 10000);
