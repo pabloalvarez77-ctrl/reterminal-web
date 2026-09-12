@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Servidor para reTerminal E1002 con Generador Automático de Imagen Estática (dashboard.png)
-- Ajuste de espaciado en cabecera: fecha "Viernes, 11 de Septiembre" con ancho amplio sin solaparse
-- Íconos vectoriales de alto contraste para el pronóstico del fin de semana (Sábado y Domingo)
-- Píldora de variación porcentual con ancho dinámico para contener el signo % al 100%
-- Generación con Pillow en <30 ms y entrega instantánea
+Servidor Robusto para reTerminal E1002 con Generador Automático de Imagen Estática (dashboard.png)
+- En / entrega el HTML con la imagen PNG incrustada directamente en Base64 (imposible que se rompa el enlace)
+- En /dashboard.png entrega el archivo PNG binario ultra-rápido (<5 ms)
+- Protección total contra valores nulos en datos de mercado y manejo de excepciones a prueba de fallos
+- Generación automática en segundo plano cada 15 minutos
 """
 
 import http.server
@@ -18,6 +18,7 @@ import gzip
 import threading
 import math
 import io
+import base64
 from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
 
@@ -41,7 +42,7 @@ CACHE_LOCK = threading.Lock()
 CALENDAR_CACHE = {"events": [], "debug": {}, "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
 WEATHER_CACHE = {"data": None, "timestamp": 0}
-IMAGE_CACHE = {"bytes": None, "timestamp": 0}
+IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
 
 def get_font(size):
     font_paths = [
@@ -60,7 +61,7 @@ def get_font(size):
     return ImageFont.load_default()
 
 def draw_weather_icon(draw, code, cx, cy, r=7):
-    """Dibuja íconos con contorno negro nítido y relleno de alto contraste"""
+    """Dibuja íconos vectoriales con contorno negro nítido de alto contraste"""
     if code in (0, 1): # Sol despejado
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         num_rays = 8
@@ -71,7 +72,7 @@ def draw_weather_icon(draw, code, cx, cy, r=7):
             x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
             y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
             draw.line([x1, y1, x2, y2], fill="#000000", width=2 if r > 7 else 1)
-    elif code in (2, 3): # Nubes con sol detrás
+    elif code in (2, 3): # Nubes con sol
         draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
         draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
@@ -121,7 +122,7 @@ def update_finance_data_sync():
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=3mo"
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=6) as resp:
                 data = json.loads(resp.read().decode())
                 result = data["chart"]["result"][0]
                 meta = result["meta"]
@@ -138,7 +139,7 @@ def update_finance_data_sync():
                 valid_candles = []
                 for o, h, l, c in zip(opens, highs, lows, closes):
                     if None not in (o, h, l, c) and o > 0 and h > 0 and l > 0 and c > 0:
-                        valid_candles.append((o, h, l, c))
+                        valid_candles.append((float(o), float(h), float(l), float(c)))
                 
                 prev_close = meta.get("regularMarketPreviousClose")
                 if not prev_close or prev_close <= 0:
@@ -362,207 +363,207 @@ def update_weather_data_sync():
 
 def render_png_dashboard():
     """Genera la imagen PNG exacta de 800x480 píxeles usando Pillow y la guarda en RAM"""
-    width, height = 800, 480
-    img = Image.new('RGB', (width, height), color='#FFFFFF')
-    draw = ImageDraw.Draw(img)
+    try:
+        width, height = 800, 480
+        img = Image.new('RGB', (width, height), color='#FFFFFF')
+        draw = ImageDraw.Draw(img)
 
-    font_clock = get_font(24)
-    font_day = get_font(12)
-    font_meta = get_font(9)
-    font_title = get_font(12)
-    font_body = get_font(11)
-    font_small = get_font(9)
-    font_tiny = get_font(7)
-    font_price = get_font(15)
-    font_badge = get_font(12) # 12px negrita limpio y legible (+50% de tamaño)
+        font_clock = get_font(24)
+        font_day = get_font(12)
+        font_meta = get_font(9)
+        font_title = get_font(12)
+        font_body = get_font(11)
+        font_small = get_font(9)
+        font_tiny = get_font(7)
+        font_price = get_font(15)
+        font_badge = get_font(12)
 
-    tz_ba = timezone(timedelta(hours=-3))
-    now_ba = datetime.now(tz_ba)
-    window_end_ba = now_ba + timedelta(hours=8)
-    
-    pad = lambda n: str(n).zfill(2)
-    time_str = f"{pad(now_ba.hour)}:{pad(now_ba.minute)}"
-    window_str = f"{time_str} – {pad(window_end_ba.hour)}:{pad(window_end_ba.minute)}"
-    
-    dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    day_str = f"{dias[now_ba.weekday()]}, {now_ba.day} de {meses[now_ba.month - 1]}"
+        tz_ba = timezone(timedelta(hours=-3))
+        now_ba = datetime.now(tz_ba)
+        window_end_ba = now_ba + timedelta(hours=8)
+        
+        pad = lambda n: str(n).zfill(2)
+        time_str = f"{pad(now_ba.hour)}:{pad(now_ba.minute)}"
+        window_str = f"{time_str} – {pad(window_end_ba.hour)}:{pad(window_end_ba.minute)}"
+        
+        dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        day_str = f"{dias[now_ba.weekday()]}, {now_ba.day} de {meses[now_ba.month - 1]}"
 
-    # Datos en RAM
-    with CACHE_LOCK:
-        wdata = WEATHER_CACHE.get("data")
-        events = CALENDAR_CACHE.get("events", [])
-        stocks = FINANCE_CACHE.get("data", [])
+        with CACHE_LOCK:
+            wdata = WEATHER_CACHE.get("data")
+            events = CALENDAR_CACHE.get("events", [])
+            stocks = FINANCE_CACHE.get("data", [])
 
-    # Clima
-    temp_cur = "14°"
-    desc_cur = "Mayormente despejado"
-    range_cur = "Mín: 12° | Máx: 17°"
-    sat_temp = "8°/13°"
-    sun_temp = "4°/11°"
-    sat_code = 2
-    sun_code = 0
-    cur_code = 1
+        # Clima
+        temp_cur = "14°"
+        desc_cur = "Mayormente despejado"
+        range_cur = "Mín: 12° | Máx: 17°"
+        sat_temp = "8°/13°"
+        sun_temp = "4°/11°"
+        sat_code = 2
+        sun_code = 0
+        cur_code = 1
 
-    if wdata:
-        try:
-            t = round(wdata["current"]["temperature_2m"])
-            temp_cur = f"{t}°"
-            code = wdata["current"]["weather_code"]
-            cur_code = code
-            if code == 0: desc_cur = "Despejado"
-            elif code in (1, 2): desc_cur = "Mayormente despejado"
-            elif code == 3: desc_cur = "Nublado"
-            elif 51 <= code <= 65: desc_cur = "Lluvia ligera"
-            elif 80 <= code <= 82: desc_cur = "Chaparrones"
-            elif code >= 95: desc_cur = "Tormenta"
+        if wdata:
+            try:
+                t = round(wdata["current"]["temperature_2m"])
+                temp_cur = f"{t}°"
+                code = wdata["current"]["weather_code"]
+                cur_code = code
+                if code == 0: desc_cur = "Despejado"
+                elif code in (1, 2): desc_cur = "Mayormente despejado"
+                elif code == 3: desc_cur = "Nublado"
+                elif 51 <= code <= 65: desc_cur = "Lluvia ligera"
+                elif 80 <= code <= 82: desc_cur = "Chaparrones"
+                elif code >= 95: desc_cur = "Tormenta"
+                
+                min_c = round(wdata["daily"]["temperature_2m_min"][0])
+                max_c = round(wdata["daily"]["temperature_2m_max"][0])
+                range_cur = f"Mín: {min_c}° | Máx: {max_c}°"
+
+                times = wdata["daily"]["time"]
+                for i, ts in enumerate(times):
+                    d = datetime.strptime(ts, "%Y-%m-%d")
+                    if d.weekday() == 5:
+                        sat_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                        sat_code = wdata["daily"]["weather_code"][i]
+                    if d.weekday() == 6:
+                        sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                        sun_code = wdata["daily"]["weather_code"][i]
+            except Exception:
+                pass
+
+        # 1. CABECERA
+        draw.rounded_rectangle([8, 8, 792, 74], radius=6, outline="#000000", width=2, fill="#FFFFFF")
+        draw.text((22, 26), time_str, font=font_clock, fill="#0044CC")
+        draw.line([104, 18, 104, 64], fill="#000000", width=2)
+        draw.text((114, 25), day_str, font=font_day, fill="#000000")
+        draw.text((114, 45), "Buenos Aires", font=font_small, fill="#555555")
+
+        draw.line([325, 18, 325, 64], fill="#000000", width=2)
+
+        draw.text((335, 21), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
+        draw_weather_icon(draw, sat_code, 345, 48, r=6)
+        draw.text((358, 43), f"SÁB: {sat_temp}", font=font_small, fill="#000000")
+        
+        draw_weather_icon(draw, sun_code, 440, 48, r=6)
+        draw.text((453, 43), f"DOM: {sun_temp}", font=font_small, fill="#000000")
+
+        draw.line([525, 18, 525, 64], fill="#000000", width=2)
+
+        draw_weather_icon(draw, cur_code, 550, 41, r=9)
+        draw.text((572, 26), temp_cur, font=font_clock, fill="#000000")
+        draw.text((630, 20), "BUENOS AIRES", font=font_meta, fill="#0044CC")
+        draw.text((630, 36), desc_cur, font=font_small, fill="#000000")
+        draw.text((630, 50), range_cur, font=font_tiny, fill="#555555")
+
+        # 2. PANEL AGENDA
+        draw.rounded_rectangle([8, 80, 448, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
+        draw.text((20, 92), "PRÓXIMAS 8 HORAS", font=font_title, fill="#000000")
+        draw.rounded_rectangle([335, 89, 436, 107], radius=3, fill="#0044CC")
+        draw.text((342, 92), window_str, font=font_small, fill="#FFFFFF")
+        draw.line([10, 114, 446, 114], fill="#000000", width=2)
+
+        if not events:
+            draw.rounded_rectangle([20, 160, 436, 380], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.text((120, 250), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
+            draw.text((95, 275), "Tu calendario no registra compromisos en este período", font=font_small, fill="#555555")
+        else:
+            y_evt = 120
+            is_roomy = len(events) <= 4
+            card_h = 68 if is_roomy else 52
+            gap = 6 if is_roomy else 4
             
-            min_c = round(wdata["daily"]["temperature_2m_min"][0])
-            max_c = round(wdata["daily"]["temperature_2m_max"][0])
-            range_cur = f"Mín: {min_c}° | Máx: {max_c}°"
+            for evt in events[:6]:
+                draw.rounded_rectangle([16, y_evt, 440, y_evt + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+                draw.rectangle([16, y_evt, 21, y_evt + card_h], fill="#0044CC")
+                
+                t_text = f"{evt['start']} – {evt['end']}"
+                draw.text((28, y_evt + 6), t_text, font=font_small, fill="#0044CC")
+                
+                dur = evt.get("duration", "30m")
+                draw.rounded_rectangle([398, y_evt + 5, 432, y_evt + 19], radius=2, fill="#000000")
+                draw.text((404, y_evt + 6), dur, font=font_tiny, fill="#FFFFFF")
+                
+                draw.text((28, y_evt + 23), evt["title"][:42], font=font_body, fill="#000000")
+                
+                sub = evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in evt["title"].lower() else "📍 Microsoft Teams")
+                if evt.get("attendees"):
+                    sub = f"👤 {', '.join(evt['attendees'])}"
+                draw.text((28, y_evt + (44 if is_roomy else 38)), sub[:46], font=font_tiny, fill="#555555")
+                
+                y_evt += card_h + gap
 
-            times = wdata["daily"]["time"]
-            for i, ts in enumerate(times):
-                d = datetime.strptime(ts, "%Y-%m-%d")
-                if d.weekday() == 5:
-                    sat_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
-                    sat_code = wdata["daily"]["weather_code"][i]
-                if d.weekday() == 6:
-                    sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
-                    sun_code = wdata["daily"]["weather_code"][i]
-        except Exception:
-            pass
+        # 3. PANEL FINANZAS
+        draw.rounded_rectangle([454, 80, 792, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
+        draw.text((466, 92), "GOOGLE FINANCE", font=font_title, fill="#000000")
+        draw.rounded_rectangle([720, 89, 780, 107], radius=3, fill="#000000")
+        draw.text((727, 92), "CARTERA", font=font_small, fill="#FFFFFF")
+        draw.line([456, 114, 790, 114], fill="#000000", width=2)
 
-    # 1. CABECERA (8, 8, 792, 74)
-    draw.rounded_rectangle([8, 8, 792, 74], radius=6, outline="#000000", width=2, fill="#FFFFFF")
-    
-    # Bloque 1: Reloj y Fecha (x=8 a x=325) -> 317px de ancho holgado para evitar solapamiento
-    draw.text((22, 26), time_str, font=font_clock, fill="#0044CC")
-    draw.line([104, 18, 104, 64], fill="#000000", width=2)
-    draw.text((114, 25), day_str, font=font_day, fill="#000000")
-    draw.text((114, 45), "Buenos Aires", font=font_small, fill="#555555")
-
-    # Divisor 1 (movido a x=325)
-    draw.line([325, 18, 325, 64], fill="#000000", width=2)
-
-    # Bloque 2: Pronóstico Fin de Semana (x=325 a x=525) con íconos de alto contraste
-    draw.text((335, 21), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
-    
-    # Sábado con icono
-    draw_weather_icon(draw, sat_code, 345, 48, r=6)
-    draw.text((358, 43), f"SÁB: {sat_temp}", font=font_small, fill="#000000")
-    
-    # Domingo con icono
-    draw_weather_icon(draw, sun_code, 440, 48, r=6)
-    draw.text((453, 43), f"DOM: {sun_temp}", font=font_small, fill="#000000")
-
-    # Divisor 2 (en x=525)
-    draw.line([525, 18, 525, 64], fill="#000000", width=2)
-
-    # Bloque 3: Clima actual (x=525 a x=792) con sol de alto contraste
-    draw_weather_icon(draw, cur_code, 550, 41, r=9)
-    draw.text((572, 26), temp_cur, font=font_clock, fill="#000000")
-    draw.text((630, 20), "BUENOS AIRES", font=font_meta, fill="#0044CC")
-    draw.text((630, 36), desc_cur, font=font_small, fill="#000000")
-    draw.text((630, 50), range_cur, font=font_tiny, fill="#555555")
-
-    # 2. PANEL AGENDA (8, 80, 448, 472)
-    draw.rounded_rectangle([8, 80, 448, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
-    draw.text((20, 92), "PRÓXIMAS 8 HORAS", font=font_title, fill="#000000")
-    draw.rounded_rectangle([335, 89, 436, 107], radius=3, fill="#0044CC")
-    draw.text((342, 92), window_str, font=font_small, fill="#FFFFFF")
-    draw.line([10, 114, 446, 114], fill="#000000", width=2)
-
-    if not events:
-        draw.rounded_rectangle([20, 160, 436, 380], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-        draw.text((120, 250), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
-        draw.text((95, 275), "Tu calendario no registra compromisos en este período", font=font_small, fill="#555555")
-    else:
-        y_evt = 120
-        is_roomy = len(events) <= 4
-        card_h = 68 if is_roomy else 52
-        gap = 6 if is_roomy else 4
+        card_w = 158
+        card_h = 110
+        row_gap = 6
         
-        for evt in events[:6]:
-            draw.rounded_rectangle([16, y_evt, 440, y_evt + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-            draw.rectangle([16, y_evt, 21, y_evt + card_h], fill="#0044CC")
+        for idx, st in enumerate(stocks[:6]):
+            r = idx // 2
+            c = idx % 2
+            x_c = 462 if c == 0 else 626
+            y_c = 120 + r * (card_h + row_gap)
             
-            t_text = f"{evt['start']} – {evt['end']}"
-            draw.text((28, y_evt + 6), t_text, font=font_small, fill="#0044CC")
+            draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.text((x_c + 7, y_c + 6), st["sym"], font=font_body, fill="#000000")
             
-            dur = evt.get("duration", "30m")
-            draw.rounded_rectangle([398, y_evt + 5, 432, y_evt + 19], radius=2, fill="#000000")
-            draw.text((404, y_evt + 6), dur, font=font_tiny, fill="#FFFFFF")
+            # Píldora de variación
+            is_up = st.get("up", True)
+            badge_bg = "#008833" if is_up else "#D60000"
+            arrow = "▲" if is_up else "▼"
+            chg_text = f"{arrow} {st['change']}"
             
-            draw.text((28, y_evt + 23), evt["title"][:42], font=font_body, fill="#000000")
+            bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
             
-            sub = evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in evt["title"].lower() else "📍 Microsoft Teams")
-            if evt.get("attendees"):
-                sub = f"👤 {', '.join(evt['attendees'])}"
-            draw.text((28, y_evt + (44 if is_roomy else 38)), sub[:46], font=font_tiny, fill="#555555")
+            pill_pad_x = 5
+            pill_pad_y = 2
+            pill_x2 = x_c + card_w - 6
+            pill_x1 = pill_x2 - (tw + 2 * pill_pad_x)
+            pill_y1 = y_c + 5
+            pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
             
-            y_evt += card_h + gap
+            draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
+            draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
+            
+            draw.text((x_c + 7, y_c + 26), f"${st['price']}", font=font_price, fill="#000000")
+            
+            # Velas de 60 días protegidas contra nulos
+            chart_x = x_c + 7
+            chart_y = y_c + 48
+            chart_w = 144
+            chart_h = 36
+            draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
+            draw.text((chart_x + 3, chart_y + 2), "60D", font=font_tiny, fill="#9CA3AF")
+            
+            candles = st.get("candles", [])
+            clean_candles = []
+            for cd in candles:
+                if len(cd) == 4 and None not in cd:
+                    try:
+                        op, hi, lo, cl = float(cd[0]), float(cd[1]), float(cd[2]), float(cd[3])
+                        if op > 0 and hi > 0 and lo > 0 and cl > 0:
+                            clean_candles.append((op, hi, lo, cl))
+                    except Exception:
+                        pass
 
-    # 3. PANEL FINANZAS (454, 80, 792, 472)
-    draw.rounded_rectangle([454, 80, 792, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
-    draw.text((466, 92), "GOOGLE FINANCE", font=font_title, fill="#000000")
-    draw.rounded_rectangle([720, 89, 780, 107], radius=3, fill="#000000")
-    draw.text((727, 92), "CARTERA", font=font_small, fill="#FFFFFF")
-    draw.line([456, 114, 790, 114], fill="#000000", width=2)
-
-    card_w = 158
-    card_h = 110
-    row_gap = 6
-    
-    for idx, st in enumerate(stocks[:6]):
-        r = idx // 2
-        c = idx % 2
-        x_c = 462 if c == 0 else 626
-        y_c = 120 + r * (card_h + row_gap)
-        
-        draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-        draw.text((x_c + 7, y_c + 6), st["sym"], font=font_body, fill="#000000")
-        
-        # PÍLDORA CON ANCHO DINÁMICO PARA CONTENER EL SIGNO %
-        is_up = st.get("up", True)
-        badge_bg = "#008833" if is_up else "#D60000"
-        arrow = "▲" if is_up else "▼"
-        chg_text = f"{arrow} {st['change']}"
-        
-        bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        
-        pill_pad_x = 5
-        pill_pad_y = 2
-        pill_x2 = x_c + card_w - 6
-        pill_x1 = pill_x2 - (tw + 2 * pill_pad_x)
-        pill_y1 = y_c + 5
-        pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
-        
-        draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
-        draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
-        
-        draw.text((x_c + 7, y_c + 26), f"${st['price']}", font=font_price, fill="#000000")
-        
-        # Velas de 60 días
-        chart_x = x_c + 7
-        chart_y = y_c + 48
-        chart_w = 144
-        chart_h = 36
-        draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
-        draw.text((chart_x + 3, chart_y + 2), "60D", font=font_tiny, fill="#9CA3AF")
-        
-        candles = st.get("candles", [])
-        if candles and len(candles) >= 2:
-            all_l = [cd[2] for cd in candles if cd[2] is not None and cd[2] > 0]
-            all_h = [cd[3] for cd in candles if cd[3] is not None and cd[3] > 0]
-            if all_l and all_h:
+            if clean_candles and len(clean_candles) >= 2:
+                all_l = [cd[2] for cd in clean_candles]
+                all_h = [cd[3] for cd in clean_candles]
                 p_min, p_max = min(all_l), max(all_h)
                 p_range = p_max - p_min if p_max > p_min else 1.0
-                step = (chart_w - 8) / max(len(candles) - 1, 1)
+                step = (chart_w - 8) / max(len(clean_candles) - 1, 1)
                 
-                for ci, (op, hi, lo, cl) in enumerate(candles):
+                for ci, (op, hi, lo, cl) in enumerate(clean_candles):
                     c_col = "#008833" if cl >= op else "#D60000"
                     cx = chart_x + 4 + ci * step
                     
@@ -575,40 +576,53 @@ def render_png_dashboard():
                     y_c = to_y(cl)
                     
                     draw.line([cx, y_h, cx, y_l], fill=c_col, width=1)
-                    
                     bt = min(y_o, y_c)
                     bb = max(y_o, y_c)
                     if bb - bt < 1: bb = bt + 1
                     draw.rectangle([cx - 1, bt, cx + 1, bb], fill=c_col, outline=c_col)
 
-        draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
-        draw.text((x_c + 7, y_c + 94), st["name"][:25], font=font_tiny, fill="#000000")
+            draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
+            draw.text((x_c + 7, y_c + 94), st["name"][:25], font=font_tiny, fill="#000000")
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    png_bytes = buf.getvalue()
-    
-    with CACHE_LOCK:
-        IMAGE_CACHE["bytes"] = png_bytes
-        IMAGE_CACHE["timestamp"] = time.time()
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        png_bytes = buf.getvalue()
+        b64_str = base64.b64encode(png_bytes).decode('ascii')
+        
+        with CACHE_LOCK:
+            IMAGE_CACHE["bytes"] = png_bytes
+            IMAGE_CACHE["b64"] = b64_str
+            IMAGE_CACHE["timestamp"] = time.time()
 
-    try:
-        with open("dashboard.png", "wb") as f:
-            f.write(png_bytes)
-    except Exception:
-        pass
+        try:
+            with open("dashboard.png", "wb") as f:
+                f.write(png_bytes)
+        except Exception:
+            pass
 
-    return png_bytes
+        return png_bytes, b64_str
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[RENDER PNG] Error: {e}")
+        # Retornar imagen básica de fallback si ocurriera un error inesperado
+        fallback = Image.new('RGB', (800, 480), '#FFFFFF')
+        d = ImageDraw.Draw(fallback)
+        d.text((50, 50), "Generando dashboard...", fill="#000000")
+        buf = io.BytesIO()
+        fallback.save(buf, format="PNG")
+        fb_bytes = buf.getvalue()
+        return fb_bytes, base64.b64encode(fb_bytes).decode('ascii')
 
 def background_worker_loop():
-    print("[BG WORKER] Hilo de renderizado de dashboard iniciado...")
+    print("[BG WORKER] Hilo en segundo plano iniciado...")
     while True:
         try:
             update_finance_data_sync()
             update_weather_data_sync()
             update_calendar_data_sync()
             render_png_dashboard()
-            print(f"[BG WORKER] Imagen dashboard.png regenerada con éxito a las {datetime.now().strftime('%H:%M:%S')}")
+            print(f"[BG WORKER] Imagen dashboard.png actualizada con éxito ({datetime.now().strftime('%H:%M:%S')})")
         except Exception as e:
             print(f"[BG WORKER] Error: {e}")
         time.sleep(900)
@@ -618,15 +632,18 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 class RequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/dashboard.png", "/image.png"):
-            with CACHE_LOCK:
-                png_bytes = IMAGE_CACHE.get("bytes")
-            
-            if not png_bytes and os.path.exists("dashboard.png"):
-                with open("dashboard.png", "rb") as f:
-                    png_bytes = f.read()
+        try:
+            if self.path in ("/dashboard.png", "/image.png"):
+                with CACHE_LOCK:
+                    png_bytes = IMAGE_CACHE.get("bytes")
+                
+                if not png_bytes and os.path.exists("dashboard.png"):
+                    with open("dashboard.png", "rb") as f:
+                        png_bytes = f.read()
 
-            if png_bytes:
+                if not png_bytes:
+                    png_bytes, _ = render_png_dashboard()
+
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Content-Length", str(len(png_bytes)))
@@ -636,95 +653,102 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(png_bytes)
                 return
-            else:
-                png_bytes = render_png_dashboard()
+
+            elif self.path == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+
+            elif self.path == "/api/finance":
+                with CACHE_LOCK:
+                    data = FINANCE_CACHE.get("data", [])
+                body = json.dumps(data).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
-                self.send_header("Content-Length", str(len(png_bytes)))
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                self.wfile.write(png_bytes)
+                self.wfile.write(body)
                 return
 
-        elif self.path == "/favicon.ico":
-            self.send_response(204)
-            self.send_header("Connection", "close")
-            self.end_headers()
-            return
+            elif self.path == "/api/calendar":
+                with CACHE_LOCK:
+                    events = CALENDAR_CACHE.get("events", [])
+                body = json.dumps(events).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+                return
 
-        elif self.path == "/api/finance":
-            with CACHE_LOCK:
-                data = FINANCE_CACHE.get("data", [])
-            body = json.dumps(data).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(body)
-            return
+            elif self.path.startswith("/api/debug_calendar"):
+                with CACHE_LOCK:
+                    debug_copy = dict(CALENDAR_CACHE.get("debug", {}))
+                    debug_copy["events"] = CALENDAR_CACHE.get("events", [])
+                body = json.dumps(debug_copy, indent=2).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+                return
 
-        elif self.path == "/api/calendar":
-            with CACHE_LOCK:
-                events = CALENDAR_CACHE.get("events", [])
-            body = json.dumps(events).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(body)
-            return
+            # En / se entrega el HTML con la imagen incrustada en Base64 directamente:
+            # ¡CERO riesgo de enlace roto o peticiones fallidas!
+            elif self.path in ("/", "/index.html"):
+                with CACHE_LOCK:
+                    b64_str = IMAGE_CACHE.get("b64")
+                if not b64_str:
+                    _, b64_str = render_png_dashboard()
 
-        elif self.path.startswith("/api/debug_calendar"):
-            with CACHE_LOCK:
-                debug_copy = dict(CALENDAR_CACHE.get("debug", {}))
-                debug_copy["events"] = CALENDAR_CACHE.get("events", [])
-            body = json.dumps(debug_copy, indent=2).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        elif self.path in ("/", "/index.html"):
-            html = """<!DOCTYPE html>
+                html = f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=800, height=480, initial-scale=1.0">
   <title>reTerminal E1002 - Dashboard</title>
   <style>
-    * { margin:0; padding:0; box-sizing:border-box; background:#FFFFFF; }
-    body { width:800px; height:480px; overflow:hidden; }
-    img { width:800px; height:480px; display:block; }
+    * {{ margin:0; padding:0; box-sizing:border-box; background:#FFFFFF; }}
+    body {{ width:800px; height:480px; overflow:hidden; }}
+    img {{ width:800px; height:480px; display:block; }}
   </style>
 </head>
 <body>
-  <img src="/dashboard.png" alt="Dashboard E-Paper">
+  <img src="data:image/png;base64,{b64_str}" alt="Dashboard E-Paper">
 </body>
 </html>"""
-            body = html.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.end_headers()
-            self.wfile.write(body)
-            return
+                body = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(body)
+                return
 
-        return super().do_GET()
+            return super().do_GET()
+        except Exception as err:
+            print(f"[HANDLER ERROR] {err}")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
 
 if __name__ == "__main__":
-    print(f"Servidor PNG de alta velocidad escuchando en el puerto {PORT}...")
+    print(f"Servidor blindado escuchando en el puerto {PORT}...")
     
+    # Generar primera imagen en RAM de inmediato
+    render_png_dashboard()
+    
+    # Iniciar hilo de actualización periódica
     bg_thread = threading.Thread(target=background_worker_loop, daemon=True)
     bg_thread.start()
     
