@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Servidor Ultra-Robusto para reTerminal E1002
-- Blindado contra valores nulos (NoneType) en activos de Yahoo Finance y reuniones
-- En / entrega el HTML con la imagen PNG incrustada en Base64 al 100%
-- En /dashboard.png entrega el archivo PNG binario ultra-rápido (<5 ms)
-- Si falla la conexión de finanzas dibuja 'Sin información disponible'
-- Actualización autónoma en segundo plano cada 15 minutos
+Servidor de Alta Legibilidad para reTerminal E1002 (Spectra 6)
+- Tipografía optimizada para tinta electrónica: piso mínimo de 10px en negrita
+- Eliminación de texto gris (#555555) que se difumina por tramado: todo el texto secundario en negro puro (#000000)
+- Píldora de duración de reuniones ampliada con texto blanco de 10px perfectamente legible
+- Leyendas de temperatura mínima/máxima y nombres de activos legibles desde cualquier distancia
+- Entrega instantánea en /dashboard.png y /
 """
 
 import http.server
@@ -78,7 +78,7 @@ def draw_weather_icon(draw, code, cx, cy, r=7):
         draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
         draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
-    else: # Lluvia
+    else: # Lluvia (ancho entero width=1)
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
         draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
@@ -134,7 +134,6 @@ def update_finance_data_sync():
                 meta = result["meta"]
                 
                 price = meta.get("regularMarketPrice", 0)
-                # Protección estricta contra None en shortName
                 raw_name = meta.get("shortName") or meta.get("symbol") or label
                 short_name = str(raw_name) if raw_name else label
                 
@@ -379,13 +378,14 @@ def render_png_dashboard():
         img = Image.new('RGB', (width, height), color='#FFFFFF')
         draw = ImageDraw.Draw(img)
 
-        font_clock = get_font(24)
-        font_day = get_font(12)
-        font_meta = get_font(9)
-        font_title = get_font(12)
-        font_body = get_font(11)
-        font_small = get_font(9)
-        font_tiny = get_font(7)
+        # NUEVA ESCALA DE ALTA LEGIBILIDAD (Piso mínimo de 10px en negrita)
+        font_clock = get_font(26)
+        font_day = get_font(13)
+        font_meta = get_font(10)
+        font_title = get_font(13)
+        font_body = get_font(12)
+        font_label = get_font(10)   # Antes 7px! Ahora 10px (+43% mayor y nítido)
+        font_pill = get_font(10)    # Para la duración de reuniones
         font_price = get_font(15)
         font_badge = get_font(12)
 
@@ -446,39 +446,39 @@ def render_png_dashboard():
 
         # 1. CABECERA
         draw.rounded_rectangle([8, 8, 792, 74], radius=6, outline="#000000", width=2, fill="#FFFFFF")
-        draw.text((22, 26), time_str, font=font_clock, fill="#0044CC")
-        draw.line([104, 18, 104, 64], fill="#000000", width=2)
-        draw.text((114, 25), day_str, font=font_day, fill="#000000")
-        draw.text((114, 45), "Buenos Aires", font=font_small, fill="#555555")
+        draw.text((20, 24), time_str, font=font_clock, fill="#0044CC")
+        draw.line([104, 16, 104, 66], fill="#000000", width=2)
+        draw.text((114, 24), day_str, font=font_day, fill="#000000")
+        draw.text((114, 46), "Buenos Aires", font=font_meta, fill="#000000")
 
-        draw.line([325, 18, 325, 64], fill="#000000", width=2)
+        draw.line([325, 16, 325, 66], fill="#000000", width=2)
 
-        draw.text((335, 21), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
+        draw.text((335, 20), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
         draw_weather_icon(draw, sat_code, 345, 48, r=6)
-        draw.text((358, 43), f"SÁB: {sat_temp}", font=font_small, fill="#000000")
+        draw.text((358, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
         
         draw_weather_icon(draw, sun_code, 440, 48, r=6)
-        draw.text((453, 43), f"DOM: {sun_temp}", font=font_small, fill="#000000")
+        draw.text((453, 42), f"DOM: {sun_temp}", font=font_label, fill="#000000")
 
-        draw.line([525, 18, 525, 64], fill="#000000", width=2)
+        draw.line([525, 16, 525, 66], fill="#000000", width=2)
 
-        draw_weather_icon(draw, cur_code, 550, 41, r=9)
-        draw.text((572, 26), temp_cur, font=font_clock, fill="#000000")
-        draw.text((630, 20), "BUENOS AIRES", font=font_meta, fill="#0044CC")
-        draw.text((630, 36), desc_cur, font=font_small, fill="#000000")
-        draw.text((630, 50), range_cur, font=font_tiny, fill="#555555")
+        draw_weather_icon(draw, cur_code, 548, 41, r=9)
+        draw.text((568, 24), temp_cur, font=font_clock, fill="#000000")
+        draw.text((626, 18), "BUENOS AIRES", font=font_meta, fill="#0044CC")
+        draw.text((626, 34), desc_cur, font=font_label, fill="#000000")
+        draw.text((626, 49), range_cur, font=font_label, fill="#000000")
 
         # 2. PANEL AGENDA
         draw.rounded_rectangle([8, 80, 448, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
         draw.text((20, 92), "PRÓXIMAS 8 HORAS", font=font_title, fill="#000000")
-        draw.rounded_rectangle([335, 89, 436, 107], radius=3, fill="#0044CC")
-        draw.text((342, 92), window_str, font=font_small, fill="#FFFFFF")
+        draw.rounded_rectangle([325, 88, 436, 108], radius=3, fill="#0044CC")
+        draw.text((332, 92), window_str, font=font_meta, fill="#FFFFFF")
         draw.line([10, 114, 446, 114], fill="#000000", width=2)
 
         if not events:
             draw.rounded_rectangle([20, 160, 436, 380], radius=4, outline="#000000", width=1, fill="#FFFFFF")
             draw.text((120, 250), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
-            draw.text((95, 275), "Tu calendario no registra compromisos en este período", font=font_small, fill="#555555")
+            draw.text((95, 275), "Tu calendario no registra compromisos en este período", font=font_label, fill="#000000")
         else:
             y_evt = 120
             is_roomy = len(events) <= 4
@@ -491,33 +491,36 @@ def render_png_dashboard():
                 
                 s_val = str(evt.get('start') or '--:--')
                 e_val = str(evt.get('end') or '--:--')
-                draw.text((28, y_evt + 6), f"{s_val} – {e_val}", font=font_small, fill="#0044CC")
+                draw.text((28, y_evt + 5), f"{s_val} – {e_val}", font=font_body, fill="#0044CC")
                 
                 dur = str(evt.get("duration") or "30m")
-                draw.rounded_rectangle([398, y_evt + 5, 432, y_evt + 19], radius=2, fill="#000000")
-                draw.text((404, y_evt + 6), dur, font=font_tiny, fill="#FFFFFF")
+                bbox_d = draw.textbbox((0, 0), dur, font=font_pill)
+                dw = int(bbox_d[2] - bbox_d[0])
+                pill_w = max(dw + 10, 36)
+                draw.rounded_rectangle([432 - pill_w, y_evt + 5, 432, y_evt + 21], radius=3, fill="#000000")
+                draw.text((432 - pill_w + 5, y_evt + 6), dur, font=font_pill, fill="#FFFFFF")
                 
-                t_str = str(evt.get("title") or "Reunión")[:42]
-                draw.text((28, y_evt + 23), t_str, font=font_body, fill="#000000")
+                t_str = str(evt.get("title") or "Reunión")[:38]
+                draw.text((28, y_evt + 24), t_str, font=font_body, fill="#000000")
                 
                 sub = str(evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in t_str.lower() else "📍 Microsoft Teams"))
                 if evt.get("attendees"):
                     sub = f"👤 {', '.join(str(a) for a in evt['attendees'])}"
-                draw.text((28, y_evt + (44 if is_roomy else 38)), sub[:46], font=font_tiny, fill="#555555")
+                draw.text((28, y_evt + (45 if is_roomy else 38)), sub[:42], font=font_label, fill="#000000")
                 
                 y_evt += card_h + gap
 
         # 3. PANEL FINANZAS
         draw.rounded_rectangle([454, 80, 792, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
         draw.text((466, 92), "GOOGLE FINANCE", font=font_title, fill="#000000")
-        draw.rounded_rectangle([720, 89, 780, 107], radius=3, fill="#000000")
-        draw.text((727, 92), "CARTERA", font=font_small, fill="#FFFFFF")
+        draw.rounded_rectangle([720, 88, 780, 108], radius=3, fill="#000000")
+        draw.text((727, 92), "CARTERA", font=font_meta, fill="#FFFFFF")
         draw.line([456, 114, 790, 114], fill="#000000", width=2)
 
         if not stocks:
             draw.rounded_rectangle([466, 180, 780, 370], radius=4, outline="#000000", width=1, fill="#FFFFFF")
             draw.text((530, 250), "Sin información disponible", font=font_title, fill="#000000")
-            draw.text((485, 275), "No se pudieron obtener las cotizaciones de tu cartera", font=font_small, fill="#555555")
+            draw.text((485, 275), "No se pudieron obtener las cotizaciones de tu cartera", font=font_label, fill="#000000")
         else:
             card_w = 158
             card_h = 110
@@ -539,8 +542,8 @@ def render_png_dashboard():
                 chg_text = f"{arrow} {str(st.get('change') or '0.00%')}"
                 
                 bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
-                tw = max(bbox[2] - bbox[0], 20)
-                th = max(bbox[3] - bbox[1], 10)
+                tw = int(max(bbox[2] - bbox[0], 20))
+                th = int(max(bbox[3] - bbox[1], 10))
                 
                 pill_pad_x = 5
                 pill_pad_y = 2
@@ -560,7 +563,7 @@ def render_png_dashboard():
                 chart_w = 144
                 chart_h = 36
                 draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
-                draw.text((chart_x + 3, chart_y + 2), "60D", font=font_tiny, fill="#9CA3AF")
+                draw.text((chart_x + 3, chart_y + 2), "60D", font=font_label, fill="#9CA3AF")
                 
                 candles = st.get("candles") or []
                 clean_candles = []
@@ -598,9 +601,9 @@ def render_png_dashboard():
                         if bb - bt < 1: bb = bt + 1
                         draw.rectangle([cx - 1, bt, cx + 1, bb], fill=c_col, outline=c_col)
 
-                draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
-                name_str = str(st.get("name") or st.get("sym") or "")[:25]
-                draw.text((x_c + 7, y_c + 94), name_str, font=font_tiny, fill="#000000")
+                draw.line([x_c + 7, y_c + 89, x_c + card_w - 7, y_c + 89], fill="#000000", width=1)
+                name_str = str(st.get("name") or st.get("sym") or "")[:22]
+                draw.text((x_c + 7, y_c + 93), name_str, font=font_label, fill="#000000")
 
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
@@ -620,13 +623,12 @@ def render_png_dashboard():
 
         return png_bytes, b64_str
     except Exception as e:
-        print(f"[RENDER PNG] Error capturado: {e}")
         import traceback
-        tb_str = traceback.format_exc()
-        print(tb_str)
-        fallback = Image.new("RGB", (800, 480), "#FFFFFF")
+        err_msg = f"Error: {e}\n{traceback.format_exc()}"
+        print(f"[RENDER PNG] Error capturado: {err_msg}")
+        fallback = Image.new('RGB', (800, 480), '#FFFFFF')
         d = ImageDraw.Draw(fallback)
-        d.text((30, 30), f"Error: {e}", fill="#D60000")
+        d.text((30, 30), err_msg[:350], fill="#D60000")
         buf = io.BytesIO()
         fallback.save(buf, format="PNG")
         fb_bytes = buf.getvalue()
@@ -634,7 +636,6 @@ def render_png_dashboard():
 
 def background_worker_loop():
     print("[BG WORKER] Iniciando carga de datos...")
-    # 1. Carga inicial de datos
     try:
         update_finance_data_sync()
         update_weather_data_sync()
@@ -644,7 +645,6 @@ def background_worker_loop():
     except Exception as e:
         print(f"[BG WORKER] Error inicial: {e}")
 
-    # 2. Ciclo continuo cada 5 minutos
     while True:
         time.sleep(300)
         try:
