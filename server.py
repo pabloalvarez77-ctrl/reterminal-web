@@ -286,7 +286,7 @@ def update_calendar_data_sync():
             busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS:\s*([A-Z]+)', raw, re.IGNORECASE)
             busy_status = busy_m.group(1).upper() if busy_m else ""
 
-            if status == "CANCELLED" or busy_status == "FREE":
+            if status == "CANCELLED":
                 continue
 
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
@@ -319,8 +319,8 @@ def update_calendar_data_sync():
                 target_start = None
                 target_end = None
 
-                # Caso evento de hoy
-                if dt_start.date() == now_ba.date():
+                # Evento normal (cualquier cita que solape con la ventana o el día)
+                if not rrule_m:
                     target_start = dt_start
                     target_end = dt_end
                 elif rrule_m:
