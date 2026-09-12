@@ -3,10 +3,10 @@
 Servidor Definitivo para reTerminal E1002 (Spectra 6)
 - Generación automática de imagen estática PNG (800x480 px) cada 15 minutos en segundo plano
 - Cabecera: Más espacio para la descripción del clima (eliminado 'BUENOS AIRES' redundante a la derecha)
-- Timeline de la jornada (8 a 17 hs) con marcas cada 1 hora, etiquetas cada 3 horas (08h, 11h, 14h, 17h) y zonas rojo/verde
+- Timeline de 8 a 17 hs: Altura 8px (mitad), negro (ocupado) y blanco (libre), marcas cada 1h, etiquetas cada 3h y marcador de hora actual en ROJO (#D60000)
 - Citas (Propuesta A): Horario y título al mismo nivel con fuente ampliada (13px negrita)
 - Finanzas: 6 activos con velas de 60 días, variación diaria con signo % garantizado y protección contra nulos
-- Entrega inmediata en /dashboard.png y / con imagen Base64 incrustada (cero riesgo de desconexión)
+- Entrega inmediata en /dashboard.png y / con imagen Base64 incrustada
 """
 
 import http.server
@@ -291,7 +291,7 @@ def update_calendar_data_sync():
 
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
-            summary = summary.replace('\\,', ',').replace('\\;', ';')
+            summary = summary_m.replace('\\,', ',').replace('\\;', ';')
 
             if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
                 continue
@@ -499,22 +499,22 @@ def render_png_dashboard():
         draw.line([10, 114, 446, 114], fill="#000000", width=2)
 
         # =========================================================================
-        # TIMELINE DE 8 A 17 HS (Marcas cada 1h, etiquetas cada 3h, sin leyendas)
+        # TIMELINE DE 8 A 17 HS: ALTURA 8px · NEGRO (OCUPADO) / BLANCO (LIBRE)
         # =========================================================================
         tl_x = 16
-        tl_y = 122
+        tl_y = 124
         tl_w = 424
-        tl_h = 16
+        tl_h = 8 # ALTURA 8px (la mitad)
 
-        # Base VERDE (#008833) = Tiempo disponible
-        draw.rounded_rectangle([tl_x, tl_y, tl_x + tl_w, tl_y + tl_h], radius=3, fill="#008833", outline="#000000", width=1)
+        # Base BLANCA (#FFFFFF) = Tiempo libre / disponible
+        draw.rounded_rectangle([tl_x, tl_y, tl_x + tl_w, tl_y + tl_h], radius=2, fill="#FFFFFF", outline="#000000", width=1)
 
         def time_to_tl_x(hh, mm):
             mins = (hh - 8) * 60 + mm
             ratio = max(0.0, min(1.0, mins / 540.0))
             return int(tl_x + ratio * tl_w)
 
-        # Bloques ocupados en ROJO (#D60000) calculados a partir de las citas del día
+        # Zonas ocupadas en NEGRO SÓLIDO (#000000) calculadas a partir de las citas del día
         for ev in timeline_events:
             s_dt = ev.get("start_dt")
             e_dt = ev.get("end_dt")
@@ -522,7 +522,7 @@ def render_png_dashboard():
                 x_start = time_to_tl_x(s_dt.hour, s_dt.minute)
                 x_end = time_to_tl_x(e_dt.hour, e_dt.minute)
                 if x_end > x_start:
-                    draw.rectangle([x_start, tl_y + 1, x_end, tl_y + tl_h - 1], fill="#D60000")
+                    draw.rectangle([x_start, tl_y + 1, x_end, tl_y + tl_h - 1], fill="#000000")
 
         # Marcas cada 1 hora (8 a 17 hs) con etiquetas cada 3 horas (08h, 11h, 14h, 17h)
         labeled_hours = {8, 11, 14, 17}
@@ -544,27 +544,27 @@ def render_png_dashboard():
                     tx = hx - hw // 2
                 draw.text((tx, tl_y + tl_h + 5), h_str, font=font_tick, fill="#000000")
 
-        # Marcador de hora actual ("AHORA") si estamos dentro de la franja de 8 a 17h
+        # Marcador de hora actual ("AHORA") en ROJO (#D60000)
         cur_hour = now_ba.hour
         cur_min = now_ba.minute
         if 8 <= cur_hour <= 17:
             now_x = time_to_tl_x(cur_hour, cur_min)
-            draw.line([now_x, tl_y - 4, now_x, tl_y + tl_h + 2], fill="#000000", width=2)
-            draw.polygon([(now_x - 3, tl_y - 5), (now_x + 3, tl_y - 5), (now_x, tl_y - 1)], fill="#000000")
+            draw.line([now_x, tl_y - 4, now_x, tl_y + tl_h + 2], fill="#D60000", width=2)
+            draw.polygon([(now_x - 3, tl_y - 5), (now_x + 3, tl_y - 5), (now_x, tl_y - 1)], fill="#D60000")
 
         # Línea divisoria bajo el timeline
-        draw.line([12, tl_y + 34, 444, tl_y + 34], fill="#E5E7EB", width=1)
+        draw.line([12, tl_y + 28, 444, tl_y + 28], fill="#E5E7EB", width=1)
 
         # =========================================================================
         # REUNIONES FORMATO "PROPUESTA A" (Horario y Título al mismo nivel)
         # =========================================================================
         if not events:
-            draw.rounded_rectangle([20, tl_y + 50, 436, 455], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.rounded_rectangle([20, tl_y + 44, 436, 455], radius=4, outline="#000000", width=1, fill="#FFFFFF")
             draw.text((120, tl_y + 110), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
             draw.text((95, tl_y + 135), "Tu calendario no registra compromisos en este período", font=font_label, fill="#000000")
         else:
-            y_card = tl_y + 40
-            card_h = 50
+            y_card = tl_y + 35
+            card_h = 51
             gap = 6
             
             for evt in events[:6]:
@@ -586,14 +586,14 @@ def render_png_dashboard():
                 bbox_d = draw.textbbox((0, 0), dur, font=font_label)
                 dw = int(bbox_d[2] - bbox_d[0])
                 pw = max(dw + 8, 30)
-                draw.rounded_rectangle([432 - pw, y_card + 5, 432, y_card + 19], radius=2, fill="#000000")
+                draw.rounded_rectangle([432 - pw, y_card + 5, 432, y_card + 20], radius=2, fill="#000000")
                 draw.text((432 - pw + 4, y_card + 6), dur, font=font_label, fill="#FFFFFF")
                 
                 # Fila 2: Detalles (Ubicación / Asistente) en negro sólido
                 sub = str(evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in t_str.lower() else "📍 Microsoft Teams"))
                 if evt.get("attendees"):
                     sub = f"👤 {', '.join(str(a) for a in evt['attendees'])}"
-                draw.text((28, y_card + 28), sub[:48], font=font_label, fill="#000000")
+                draw.text((28, y_card + 29), sub[:48], font=font_label, fill="#000000")
                 
                 y_card += card_h + gap
 
