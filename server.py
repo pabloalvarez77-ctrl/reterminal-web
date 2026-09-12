@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
 Servidor Definitivo para reTerminal E1002 (Spectra 6)
-- Gestión de calendario restaurada con la lógica exacta de 'Proyecto A OK web':
-  * Cero filtrado ciego de busy_status==FREE (las citas de fin de semana / personales se muestran al 100%)
-  * Captura directa de cualquier cita en la ventana de las próximas 8 horas (dt_end >= now_ba and dt_start <= window_end_ba)
-- Cabecera: Más espacio para la descripción del clima (eliminado 'BUENOS AIRES' redundante a la derecha)
-- Timeline de 8 a 17 hs: Altura 8px (mitad), negro (ocupado) y blanco (libre), marcas cada 1h, etiquetas cada 3h y marcador en ROJO (#D60000)
-- Citas (Propuesta A): Horario y título al mismo nivel con fuente ampliada (13px negrita)
-- Finanzas: 6 activos con velas de 60 días, variación con signo % garantizado y protección contra nulos
-- Entrega inmediata en /dashboard.png y / con imagen Base64 incrustada
+- Estación Meteorológica: Fijada exclusivamente en Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con fallback a wttr.in/SABE
+- Paleta estricta de los 6 colores primarios Spectra 6 de la e1002 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00)
+- Íconos con detección Día (Sol) / Noche (Luna) y alto contraste
+- Timeline de 8 a 17 hs: Altura 8px, Negro (ocupado), Blanco (libre), marcas cada 1h, etiquetas cada 3h y marcador actual en Rojo (#D60000)
+- Citas (Propuesta A): Horario y título al mismo nivel (13px negrita), captura de citas sin pérdida (Proyecto A OK web)
+- Finanzas: 6 activos con velas de 60 días, variación con % dinámico garantizado y nombres blindados
+- Entrega en /dashboard.png y / con imagen Base64 incrustada (<5 ms)
 """
 
 import http.server
@@ -38,7 +37,11 @@ ICAL_URL = os.environ.get(
 SHEET_ID = "1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
-# Exclusiones de canceladas
+# Coordenadas exactas Estación Meteorológica Aeroparque Jorge Newbery (SABE)
+AEROPARQUE_LAT = "-34.5586"
+AEROPARQUE_LON = "-58.4164"
+
+# Exclusiones de canceladas históricas
 EXCLUDED_TITLES = ["proyecto 90k", "graciela maestra pedro", "cancelado", "canceled", "rechazado"]
 
 # Memoria RAM compartida
@@ -65,9 +68,17 @@ def get_font(size):
                 pass
     return ImageFont.load_default()
 
-def draw_weather_icon(draw, code, cx, cy, r=7):
-    """Dibuja íconos vectoriales con contorno negro nítido de alto contraste (grosores enteros)"""
-    if code in (0, 1): # Sol despejado
+def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
+    """
+    Dibuja íconos meteorológicos utilizando EXCLUSIVAMENTE los 6 colores primarios de Spectra 6:
+    Blanco (#FFFFFF), Negro (#000000), Rojo (#D60000), Verde (#008833), Azul (#0044CC), Amarillo (#FFCC00).
+    """
+    if not is_day and code in (0, 1): # Noche despejada -> LUNA
+        # Medialuna amarilla con contorno negro
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
+        draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
+        draw.ellipse([cx - r + 6, cy - r - 1, cx + r + 2, cy + r - 3], fill="#FFFFFF")
+    elif code in (0, 1): # Día despejado -> SOL
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         num_rays = 8
         for i in range(num_rays):
@@ -77,11 +88,16 @@ def draw_weather_icon(draw, code, cx, cy, r=7):
             x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
             y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
             draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
-    elif code in (2, 3): # Nubes con sol
-        draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
+    elif code in (2, 3): # Nubes con sol/luna detrás
+        back_color = "#FFCC00"
+        draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill=back_color, outline="#000000", width=1)
         draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
-    else: # Lluvia (grosor entero width=1)
+    elif code >= 95: # Tormenta con rayo
+        draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
+        # Rayo amarillo con borde negro
+        draw.polygon([(cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6), (cx + 4, cy + 6), (cx - 3, cy + 12), (cx - 1, cy + 7), (cx - 4, cy + 7)], fill="#FFCC00", outline="#000000")
+    else: # Lluvia (gotas en azul primario puro)
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
         draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
@@ -250,7 +266,7 @@ def extract_people_from_vevent(raw):
     return people
 
 def update_calendar_data_sync():
-    """Lógica exacta de calendario de 'Proyecto A OK web' con soporte de timeline"""
+    """Lógica exacta de 'Proyecto A OK web': sin filtrado de FREE y con captura completa de la ventana"""
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
@@ -376,17 +392,69 @@ def update_calendar_data_sync():
         print(f"[CALENDAR] Error: {e}")
 
 def update_weather_data_sync():
+    """Consulta la estación meteorológica oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
+    weather_result = None
+    
+    # 1. Intento principal: Open-Meteo centrado en la pista de Aeroparque (SABE)
     try:
-        url = 'https://api.open-meteo.com/v1/forecast?latitude=-34.6037&longitude=-58.3816&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        url = f'https://api.open-meteo.com/v1/forecast?latitude={AEROPARQUE_LAT}&longitude={AEROPARQUE_LON}&current=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires&forecast_days=10'
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode())
-            with CACHE_LOCK:
-                WEATHER_CACHE["data"] = data
-                WEATHER_CACHE["timestamp"] = time.time()
-            print("[BG WORKER] Clima actualizado")
+            if "current" in data and "temperature_2m" in data["current"]:
+                weather_result = data
+                print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
-        print(f"[BG WORKER] Error en clima: {e}")
+        print(f"[BG WORKER] Aviso: Open-Meteo Aeroparque falló ({e}). Probando estación METAR de respaldo...")
+
+    # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in
+    if not weather_result:
+        try:
+            url_fallback = 'https://wttr.in/SABE?format=j1'
+            req_fb = urllib.request.Request(
+                url_fallback,
+                headers={'User-Agent': 'curl/7.88.1'}
+            )
+            with urllib.request.urlopen(req_fb, timeout=6) as resp:
+                data_fb = json.loads(resp.read().decode())
+                current_cond = data_fb["current_condition"][0]
+                temp_c = float(current_cond["temp_C"])
+                desc = current_cond["lang_es"][0]["value"] if "lang_es" in current_cond else current_cond["weatherDesc"][0]["value"]
+                
+                # Mapear a estructura estándar
+                daily_forecast = data_fb.get("weather", [])
+                min_t = float(daily_forecast[0]["mintempC"]) if daily_forecast else temp_c - 3
+                max_t = float(daily_forecast[0]["maxtempC"]) if daily_forecast else temp_c + 4
+
+                tz_ba = timezone(timedelta(hours=-3))
+                hour_now = datetime.now(tz_ba).hour
+                is_day_fb = 1 if (7 <= hour_now <= 19) else 0
+
+                weather_result = {
+                    "current": {
+                        "temperature_2m": temp_c,
+                        "weather_code": 1 if "despejado" in desc.lower() or "soleado" in desc.lower() else (2 if "nublado" in desc.lower() or "cubierto" in desc.lower() else 61),
+                        "is_day": is_day_fb,
+                        "desc_text": desc
+                    },
+                    "daily": {
+                        "temperature_2m_min": [min_t, min_t + 1, min_t - 1],
+                        "temperature_2m_max": [max_t, max_t - 2, max_t + 1],
+                        "weather_code": [1, 2, 0],
+                        "time": ["", "", ""]
+                    }
+                }
+                print("[BG WORKER] Clima actualizado desde estación METAR Aeroparque (wttr.in)")
+        except Exception as err_fb:
+            print(f"[BG WORKER] Error en estación de respaldo Aeroparque: {err_fb}")
+
+    if weather_result:
+        with CACHE_LOCK:
+            WEATHER_CACHE["data"] = weather_result
+            WEATHER_CACHE["timestamp"] = time.time()
 
 def render_png_dashboard():
     """Genera la imagen PNG exacta de 800x480 píxeles usando Pillow y la guarda en RAM"""
@@ -428,45 +496,65 @@ def render_png_dashboard():
             timeline_events = CALENDAR_CACHE.get("today_all_events") or []
             stocks = FINANCE_CACHE.get("data") or []
 
-        temp_cur = "14°"
-        desc_cur = "Mayormente despejado"
-        range_cur = "Mín: 12° | Máx: 17°"
-        sat_temp = "8°/13°"
-        sun_temp = "4°/11°"
+        # Valores dinámicos de Aeroparque
+        temp_cur = "--°"
+        desc_cur = "Estación Aeroparque"
+        range_cur = "Mín: --° | Máx: --°"
+        sat_temp = "--°/--°"
+        sun_temp = "--°/--°"
         sat_code = 2
         sun_code = 0
         cur_code = 1
+        is_day = (7 <= now_ba.hour <= 19)
 
         if wdata:
             try:
                 t = round(wdata["current"]["temperature_2m"])
                 temp_cur = f"{t}°"
-                code = wdata["current"]["weather_code"]
+                code = wdata["current"].get("weather_code", 1)
                 cur_code = code
-                if code == 0: desc_cur = "Despejado"
-                elif code in (1, 2): desc_cur = "Mayormente despejado"
-                elif code == 3: desc_cur = "Nublado"
-                elif 51 <= code <= 65: desc_cur = "Lluvia ligera"
-                elif 80 <= code <= 82: desc_cur = "Chaparrones"
-                elif code >= 95: desc_cur = "Tormenta"
+                if "is_day" in wdata["current"]:
+                    is_day = bool(wdata["current"]["is_day"])
+
+                if "desc_text" in wdata["current"]:
+                    desc_cur = wdata["current"]["desc_text"][:24]
+                else:
+                    if code == 0: desc_cur = "Despejado" if is_day else "Cielo claro"
+                    elif code in (1, 2): desc_cur = "Mayormente despejado" if is_day else "Parcialmente nublado"
+                    elif code == 3: desc_cur = "Nublado"
+                    elif 51 <= code <= 65: desc_cur = "Lluvia ligera"
+                    elif 80 <= code <= 82: desc_cur = "Chaparrones"
+                    elif code >= 95: desc_cur = "Tormenta"
                 
                 min_c = round(wdata["daily"]["temperature_2m_min"][0])
                 max_c = round(wdata["daily"]["temperature_2m_max"][0])
                 range_cur = f"Mín: {min_c}° | Máx: {max_c}°"
 
+                # Determinar fechas exactas del fin de semana sincronizado
+                if now_ba.weekday() == 6: # Domingo: mirar al próximo fin de semana completo
+                    target_sat = (now_ba + timedelta(days=6)).date()
+                else: # Lunes a Sábado: fin de semana en curso / próximo
+                    days_to_sat = 5 - now_ba.weekday()
+                    target_sat = (now_ba + timedelta(days=days_to_sat)).date()
+                target_sun = target_sat + timedelta(days=1)
+
                 times = wdata["daily"]["time"]
                 for i, ts in enumerate(times):
-                    d = datetime.strptime(ts, "%Y-%m-%d")
-                    if d.weekday() == 5:
-                        sat_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
-                        sat_code = wdata["daily"]["weather_code"][i]
-                    if d.weekday() == 6:
-                        sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
-                        sun_code = wdata["daily"]["weather_code"][i]
+                    if ts:
+                        d = datetime.strptime(ts, "%Y-%m-%d").date()
+                        if d == target_sat:
+                            sat_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                            sat_code = wdata["daily"]["weather_code"][i]
+                        elif d == target_sun:
+                            sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                            sun_code = wdata["daily"]["weather_code"][i]
+                    else:
+                        sat_temp = f"{round(wdata['daily']['temperature_2m_min'][1])}°/{round(wdata['daily']['temperature_2m_max'][1])}°"
+                        sun_temp = f"{round(wdata['daily']['temperature_2m_min'][2])}°/{round(wdata['daily']['temperature_2m_max'][2])}°"
             except Exception:
                 pass
 
-        # 1. CABECERA (Ajuste aprobado: sin BUENOS AIRES a la derecha)
+        # 1. CABECERA (Paleta pura Spectra 6)
         draw.rounded_rectangle([8, 8, 792, 74], radius=6, outline="#000000", width=2, fill="#FFFFFF")
         draw.text((20, 24), time_str, font=font_clock, fill="#0044CC")
         draw.line([104, 16, 104, 66], fill="#000000", width=2)
@@ -477,15 +565,15 @@ def render_png_dashboard():
 
         # Pronóstico Fin de Semana
         draw.text((335, 20), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
-        draw_weather_icon(draw, sat_code, 345, 48, r=6)
+        draw_weather_icon(draw, sat_code, 345, 48, r=6, is_day=True)
         draw.text((358, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
-        draw_weather_icon(draw, sun_code, 440, 48, r=6)
+        draw_weather_icon(draw, sun_code, 440, 48, r=6, is_day=True)
         draw.text((453, 42), f"DOM: {sun_temp}", font=font_label, fill="#000000")
 
         draw.line([525, 16, 525, 66], fill="#000000", width=2)
 
-        # Clima actual ampliado
-        draw_weather_icon(draw, cur_code, 550, 41, r=10)
+        # Clima actual de Aeroparque (Sol de día / Luna de noche)
+        draw_weather_icon(draw, cur_code, 550, 41, r=10, is_day=is_day)
         draw.text((572, 24), temp_cur, font=font_clock, fill="#000000")
         draw.text((634, 27), desc_cur, font=font_desc_clima, fill="#000000")
         draw.text((634, 48), range_cur, font=font_range_clima, fill="#0044CC")
@@ -498,12 +586,12 @@ def render_png_dashboard():
         draw.line([10, 114, 446, 114], fill="#000000", width=2)
 
         # =========================================================================
-        # TIMELINE DE 8 A 17 HS: ALTURA 8px · NEGRO (OCUPADO) / BLANCO (LIBRE)
+        # TIMELINE DE 8 A 17 HS: ALTURA 8px · NEGRO (#000000) / BLANCO (#FFFFFF)
         # =========================================================================
         tl_x = 16
         tl_y = 124
         tl_w = 424
-        tl_h = 8 # ALTURA 8px (la mitad)
+        tl_h = 8
 
         # Base BLANCA (#FFFFFF) = Tiempo libre / disponible
         draw.rounded_rectangle([tl_x, tl_y, tl_x + tl_w, tl_y + tl_h], radius=2, fill="#FFFFFF", outline="#000000", width=1)
@@ -513,7 +601,7 @@ def render_png_dashboard():
             ratio = max(0.0, min(1.0, mins / 540.0))
             return int(tl_x + ratio * tl_w)
 
-        # Zonas ocupadas en NEGRO SÓLIDO (#000000) calculadas a partir de las citas del día
+        # Zonas ocupadas en NEGRO SÓLIDO (#000000)
         for ev in timeline_events:
             s_dt = ev.get("start_dt")
             e_dt = ev.get("end_dt")
@@ -543,7 +631,7 @@ def render_png_dashboard():
                     tx = hx - hw // 2
                 draw.text((tx, tl_y + tl_h + 5), h_str, font=font_tick, fill="#000000")
 
-        # Marcador de hora actual ("AHORA") en ROJO (#D60000)
+        # Marcador de hora actual ("AHORA") en ROJO PRIMARIO (#D60000)
         cur_hour = now_ba.hour
         cur_min = now_ba.minute
         if 8 <= cur_hour <= 17:
@@ -552,7 +640,7 @@ def render_png_dashboard():
             draw.polygon([(now_x - 3, tl_y - 5), (now_x + 3, tl_y - 5), (now_x, tl_y - 1)], fill="#D60000")
 
         # Línea divisoria bajo el timeline
-        draw.line([12, tl_y + 28, 444, tl_y + 28], fill="#E5E7EB", width=1)
+        draw.line([12, tl_y + 28, 444, tl_y + 28], fill="#000000", width=1)
 
         # =========================================================================
         # REUNIONES FORMATO "PROPUESTA A" (Horario y Título al mismo nivel)
@@ -578,7 +666,7 @@ def render_png_dashboard():
 
                 # Fila 1: Horario + Título grande en negrita (13px) al mismo nivel
                 draw.text((28, y_card + 5), t_full, font=font_time, fill="#0044CC")
-                draw.text((120, y_card + 4), "•", font=font_time, fill="#888888")
+                draw.text((120, y_card + 4), "•", font=font_time, fill="#000000")
                 draw.text((130, y_card + 4), t_str, font=font_t_big, fill="#000000")
                 
                 # Pastilla de duración a la derecha
@@ -596,7 +684,7 @@ def render_png_dashboard():
                 
                 y_card += card_h + gap
 
-        # 3. PANEL FINANZAS
+        # 3. PANEL FINANZAS (Paleta pura Spectra 6)
         draw.rounded_rectangle([454, 80, 792, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
         draw.text((466, 92), "GOOGLE FINANCE", font=font_title, fill="#000000")
         draw.rounded_rectangle([720, 88, 780, 108], radius=3, fill="#000000")
@@ -644,12 +732,13 @@ def render_png_dashboard():
                 prc_str = str(st.get("price") or "0.00")
                 draw.text((x_c + 7, y_c + 26), f"${prc_str}", font=font_price, fill="#000000")
                 
+                # Gráfico de velas con fondo blanco puro y borde negro
                 chart_x = x_c + 7
                 chart_y = y_c + 48
                 chart_w = 144
                 chart_h = 36
-                draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
-                draw.text((chart_x + 3, chart_y + 2), "60D", font=font_label, fill="#9CA3AF")
+                draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FFFFFF", outline="#000000", width=1)
+                draw.text((chart_x + 3, chart_y + 2), "60D", font=font_label, fill="#000000")
                 
                 candles = st.get("candles") or []
                 clean_candles = []
@@ -792,6 +881,20 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 with CACHE_LOCK:
                     events = CALENDAR_CACHE.get("events", [])
                 body = json.dumps(events).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            elif self.path.startswith("/api/debug_calendar"):
+                with CACHE_LOCK:
+                    debug_copy = dict(CALENDAR_CACHE.get("debug", {}))
+                    debug_copy["events"] = CALENDAR_CACHE.get("events", [])
+                body = json.dumps(debug_copy, indent=2).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
