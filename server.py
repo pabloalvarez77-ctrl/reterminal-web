@@ -621,9 +621,12 @@ def render_png_dashboard():
         return png_bytes, b64_str
     except Exception as e:
         print(f"[RENDER PNG] Error capturado: {e}")
-        fallback = Image.new('RGB', (800, 480), '#FFFFFF')
+        import traceback
+        tb_str = traceback.format_exc()
+        print(tb_str)
+        fallback = Image.new("RGB", (800, 480), "#FFFFFF")
         d = ImageDraw.Draw(fallback)
-        d.text((50, 50), "Generando dashboard...", fill="#000000")
+        d.text((30, 30), f"Error: {e}", fill="#D60000")
         buf = io.BytesIO()
         fallback.save(buf, format="PNG")
         fb_bytes = buf.getvalue()
