@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Servidor Robusto para reTerminal E1002 con Generador Automático de Imagen Estática (dashboard.png)
-- En / entrega el HTML con la imagen PNG incrustada directamente en Base64 (imposible que se rompa el enlace)
+Servidor Ultra-Robusto para reTerminal E1002
+- Blindado contra valores nulos (NoneType) en activos de Yahoo Finance y reuniones
+- En / entrega el HTML con la imagen PNG incrustada en Base64 al 100%
 - En /dashboard.png entrega el archivo PNG binario ultra-rápido (<5 ms)
-- Dibuja el estado vacío con mensaje explícito 'Sin información disponible' si la cartera no tiene datos
-- Las citas entre 23:00 y 07:00 muestran correctamente que no hay compromisos en esa franja nocturna
+- Si falla la conexión de finanzas dibuja 'Sin información disponible'
+- Actualización autónoma en segundo plano cada 15 minutos
 """
 
 import http.server
@@ -47,8 +48,9 @@ IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
 def get_font(size):
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "C:\\Windows\\Fonts\\arialbd.ttf",
         "C:\\Windows\\Fonts\\arial.ttf"
     ]
@@ -61,6 +63,7 @@ def get_font(size):
     return ImageFont.load_default()
 
 def draw_weather_icon(draw, code, cx, cy, r=7):
+    """Dibuja íconos vectoriales con contorno negro nítido de alto contraste"""
     if code in (0, 1): # Sol despejado
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         num_rays = 8
@@ -131,7 +134,9 @@ def update_finance_data_sync():
                 meta = result["meta"]
                 
                 price = meta.get("regularMarketPrice", 0)
-                short_name = meta.get("shortName", meta.get("symbol", label))
+                # Protección estricta contra None en shortName
+                raw_name = meta.get("shortName") or meta.get("symbol") or label
+                short_name = str(raw_name) if raw_name else label
                 
                 quote = result.get("indicators", {}).get("quote", [{}])[0]
                 opens = quote.get("open", [])
@@ -142,7 +147,10 @@ def update_finance_data_sync():
                 valid_candles = []
                 for o, h, l, c in zip(opens, highs, lows, closes):
                     if None not in (o, h, l, c) and o > 0 and h > 0 and l > 0 and c > 0:
-                        valid_candles.append((float(o), float(h), float(l), float(c)))
+                        try:
+                            valid_candles.append((float(o), float(h), float(l), float(c)))
+                        except Exception:
+                            pass
                 
                 prev_close = meta.get("regularMarketPreviousClose")
                 if not prev_close or prev_close <= 0:
@@ -175,7 +183,7 @@ def update_finance_data_sync():
         with CACHE_LOCK:
             FINANCE_CACHE["data"] = results
             FINANCE_CACHE["timestamp"] = time.time()
-        print(f"[BG WORKER] Finanzas actualizadas con éxito: {len(results)} activos")
+        print(f"[BG WORKER] Finanzas actualizadas: {len(results)} activos con velas 60D")
 
 def parse_ical_dt(dt_raw, tz_ba):
     is_z = 'Z' in dt_raw
@@ -193,14 +201,14 @@ def parse_ical_dt(dt_raw, tz_ba):
 def is_clean_human_name(name):
     if not name:
         return False
-    lower = name.lower().strip()
+    lower = str(name).lower().strip()
     bad_tokens = (
         'thread.', '19_meeting', '19:', 'resource.calendar', 'skype',
         'microsoft teams', 'reunión de microsoft', 'teams meeting'
     )
     if any(x in lower for x in bad_tokens):
         return False
-    return len(name.strip()) >= 2
+    return len(str(name).strip()) >= 2
 
 def extract_people_from_vevent(raw):
     people = []
@@ -210,7 +218,7 @@ def extract_people_from_vevent(raw):
         line = org_line.group(0)
         cn = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', line, re.IGNORECASE)
         if cn:
-            cand = (cn.group(1) or cn.group(2)).strip().replace('"', '')
+            cand = str(cn.group(1) or cn.group(2)).strip().replace('"', '')
             if is_clean_human_name(cand) and cand not in people:
                 people.append(cand)
         else:
@@ -225,7 +233,7 @@ def extract_people_from_vevent(raw):
     for line in re.findall(r'ATTENDEE[^\r\n]+', raw, re.IGNORECASE):
         cn = re.search(r';CN=(?:"([^"]+)"|([^;:\r\n]+))', line, re.IGNORECASE)
         if cn:
-            cand = (cn.group(1) or cn.group(2)).strip().replace('"', '')
+            cand = str(cn.group(1) or cn.group(2)).strip().replace('"', '')
             if is_clean_human_name(cand) and cand not in people:
                 people.append(cand)
         else:
@@ -395,8 +403,8 @@ def render_png_dashboard():
 
         with CACHE_LOCK:
             wdata = WEATHER_CACHE.get("data")
-            events = CALENDAR_CACHE.get("events", [])
-            stocks = FINANCE_CACHE.get("data", [])
+            events = CALENDAR_CACHE.get("events") or []
+            stocks = FINANCE_CACHE.get("data") or []
 
         temp_cur = "14°"
         desc_cur = "Mayormente despejado"
@@ -481,18 +489,20 @@ def render_png_dashboard():
                 draw.rounded_rectangle([16, y_evt, 440, y_evt + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
                 draw.rectangle([16, y_evt, 21, y_evt + card_h], fill="#0044CC")
                 
-                t_text = f"{evt['start']} – {evt['end']}"
-                draw.text((28, y_evt + 6), t_text, font=font_small, fill="#0044CC")
+                s_val = str(evt.get('start') or '--:--')
+                e_val = str(evt.get('end') or '--:--')
+                draw.text((28, y_evt + 6), f"{s_val} – {e_val}", font=font_small, fill="#0044CC")
                 
-                dur = evt.get("duration", "30m")
+                dur = str(evt.get("duration") or "30m")
                 draw.rounded_rectangle([398, y_evt + 5, 432, y_evt + 19], radius=2, fill="#000000")
                 draw.text((404, y_evt + 6), dur, font=font_tiny, fill="#FFFFFF")
                 
-                draw.text((28, y_evt + 23), evt["title"][:42], font=font_body, fill="#000000")
+                t_str = str(evt.get("title") or "Reunión")[:42]
+                draw.text((28, y_evt + 23), t_str, font=font_body, fill="#000000")
                 
-                sub = evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in evt["title"].lower() else "📍 Microsoft Teams")
+                sub = str(evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in t_str.lower() else "📍 Microsoft Teams"))
                 if evt.get("attendees"):
-                    sub = f"👤 {', '.join(evt['attendees'])}"
+                    sub = f"👤 {', '.join(str(a) for a in evt['attendees'])}"
                 draw.text((28, y_evt + (44 if is_roomy else 38)), sub[:46], font=font_tiny, fill="#555555")
                 
                 y_evt += card_h + gap
@@ -504,7 +514,6 @@ def render_png_dashboard():
         draw.text((727, 92), "CARTERA", font=font_small, fill="#FFFFFF")
         draw.line([456, 114, 790, 114], fill="#000000", width=2)
 
-        # Si aún no hay datos de cotizaciones, mostrar mensaje claro en lugar de dejar el panel blanco
         if not stocks:
             draw.rounded_rectangle([466, 180, 780, 370], radius=4, outline="#000000", width=1, fill="#FFFFFF")
             draw.text((530, 250), "Sin información disponible", font=font_title, fill="#000000")
@@ -521,28 +530,30 @@ def render_png_dashboard():
                 y_c = 120 + r * (card_h + row_gap)
                 
                 draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-                draw.text((x_c + 7, y_c + 6), st["sym"], font=font_body, fill="#000000")
+                sym_str = str(st.get("sym") or "")
+                draw.text((x_c + 7, y_c + 6), sym_str, font=font_body, fill="#000000")
                 
-                is_up = st.get("up", True)
+                is_up = bool(st.get("up", True))
                 badge_bg = "#008833" if is_up else "#D60000"
                 arrow = "▲" if is_up else "▼"
-                chg_text = f"{arrow} {st['change']}"
+                chg_text = f"{arrow} {str(st.get('change') or '0.00%')}"
                 
                 bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
+                tw = max(bbox[2] - bbox[0], 20)
+                th = max(bbox[3] - bbox[1], 10)
                 
                 pill_pad_x = 5
                 pill_pad_y = 2
                 pill_x2 = x_c + card_w - 6
-                pill_x1 = pill_x2 - (tw + 2 * pill_pad_x)
+                pill_x1 = max(pill_x2 - (tw + 2 * pill_pad_x), x_c + 60)
                 pill_y1 = y_c + 5
                 pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
                 
                 draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
                 draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
                 
-                draw.text((x_c + 7, y_c + 26), f"${st['price']}", font=font_price, fill="#000000")
+                prc_str = str(st.get("price") or "0.00")
+                draw.text((x_c + 7, y_c + 26), f"${prc_str}", font=font_price, fill="#000000")
                 
                 chart_x = x_c + 7
                 chart_y = y_c + 48
@@ -551,10 +562,10 @@ def render_png_dashboard():
                 draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
                 draw.text((chart_x + 3, chart_y + 2), "60D", font=font_tiny, fill="#9CA3AF")
                 
-                candles = st.get("candles", [])
+                candles = st.get("candles") or []
                 clean_candles = []
                 for cd in candles:
-                    if len(cd) == 4 and None not in cd:
+                    if isinstance(cd, (list, tuple)) and len(cd) == 4 and None not in cd:
                         try:
                             op, hi, lo, cl = float(cd[0]), float(cd[1]), float(cd[2]), float(cd[3])
                             if op > 0 and hi > 0 and lo > 0 and cl > 0:
@@ -588,7 +599,8 @@ def render_png_dashboard():
                         draw.rectangle([cx - 1, bt, cx + 1, bb], fill=c_col, outline=c_col)
 
                 draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
-                draw.text((x_c + 7, y_c + 94), st["name"][:25], font=font_tiny, fill="#000000")
+                name_str = str(st.get("name") or st.get("sym") or "")[:25]
+                draw.text((x_c + 7, y_c + 94), name_str, font=font_tiny, fill="#000000")
 
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
@@ -608,7 +620,7 @@ def render_png_dashboard():
 
         return png_bytes, b64_str
     except Exception as e:
-        print(f"[RENDER PNG] Error: {e}")
+        print(f"[RENDER PNG] Error capturado: {e}")
         fallback = Image.new('RGB', (800, 480), '#FFFFFF')
         d = ImageDraw.Draw(fallback)
         d.text((50, 50), "Generando dashboard...", fill="#000000")
@@ -618,16 +630,16 @@ def render_png_dashboard():
         return fb_bytes, base64.b64encode(fb_bytes).decode('ascii')
 
 def background_worker_loop():
-    print("[BG WORKER] Hilo en segundo plano iniciado...")
-    # 1. Primera carga inmediata de datos
+    print("[BG WORKER] Iniciando carga de datos...")
+    # 1. Carga inicial de datos
     try:
         update_finance_data_sync()
         update_weather_data_sync()
         update_calendar_data_sync()
         render_png_dashboard()
-        print("[BG WORKER] Primera imagen generada con éxito con todos los datos de mercado.")
+        print("[BG WORKER] Primera imagen generada con éxito con todos los datos.")
     except Exception as e:
-        print(f"[BG WORKER] Error en carga inicial: {e}")
+        print(f"[BG WORKER] Error inicial: {e}")
 
     # 2. Ciclo continuo cada 5 minutos
     while True:
@@ -637,9 +649,9 @@ def background_worker_loop():
             update_weather_data_sync()
             update_calendar_data_sync()
             render_png_dashboard()
-            print(f"[BG WORKER] Imagen dashboard.png actualizada ({datetime.now().strftime('%H:%M:%S')})")
+            print(f"[BG WORKER] Imagen actualizada ({datetime.now().strftime('%H:%M:%S')})")
         except Exception as e:
-            print(f"[BG WORKER] Error: {e}")
+            print(f"[BG WORKER] Error en ciclo: {e}")
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
@@ -756,7 +768,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"Servidor escuchando en el puerto {PORT}...")
     
-    # Iniciar hilo en segundo plano
     bg_thread = threading.Thread(target=background_worker_loop, daemon=True)
     bg_thread.start()
     
