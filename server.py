@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Servidor Definitivo para reTerminal E1002 (Spectra 6)
-- Generación automática de imagen estática PNG (800x480 px) cada 15 minutos en segundo plano
+- Gestión de calendario restaurada con la lógica exacta de 'Proyecto A OK web':
+  * Cero filtrado ciego de busy_status==FREE (las citas de fin de semana / personales se muestran al 100%)
+  * Captura directa de cualquier cita en la ventana de las próximas 8 horas (dt_end >= now_ba and dt_start <= window_end_ba)
 - Cabecera: Más espacio para la descripción del clima (eliminado 'BUENOS AIRES' redundante a la derecha)
-- Timeline de 8 a 17 hs: Altura 8px (mitad), negro (ocupado) y blanco (libre), marcas cada 1h, etiquetas cada 3h y marcador de hora actual en ROJO (#D60000)
+- Timeline de 8 a 17 hs: Altura 8px (mitad), negro (ocupado) y blanco (libre), marcas cada 1h, etiquetas cada 3h y marcador en ROJO (#D60000)
 - Citas (Propuesta A): Horario y título al mismo nivel con fuente ampliada (13px negrita)
-- Finanzas: 6 activos con velas de 60 días, variación diaria con signo % garantizado y protección contra nulos
+- Finanzas: 6 activos con velas de 60 días, variación con signo % garantizado y protección contra nulos
 - Entrega inmediata en /dashboard.png y / con imagen Base64 incrustada
 """
 
@@ -41,7 +43,7 @@ EXCLUDED_TITLES = ["proyecto 90k", "graciela maestra pedro", "cancelado", "cance
 
 # Memoria RAM compartida
 CACHE_LOCK = threading.Lock()
-CALENDAR_CACHE = {"events": [], "today_all_events": [], "debug": {}, "timestamp": 0}
+CALENDAR_CACHE = {"events": [], "today_all_events": [], "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
 WEATHER_CACHE = {"data": None, "timestamp": 0}
 IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
@@ -248,6 +250,7 @@ def extract_people_from_vevent(raw):
     return people
 
 def update_calendar_data_sync():
+    """Lógica exacta de calendario de 'Proyecto A OK web' con soporte de timeline"""
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
@@ -255,13 +258,13 @@ def update_calendar_data_sync():
     day_end_ba = now_ba.replace(hour=17, minute=0, second=0, microsecond=0)
     
     events_window = []
-    events_today_daytime = []
+    timeline_events = []
 
     try:
         req = urllib.request.Request(
             ICAL_URL,
             headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                 'Accept': 'text/calendar, text/plain, */*',
                 'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive'
@@ -283,15 +286,12 @@ def update_calendar_data_sync():
         for raw in raw_events:
             status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
             status = status_m.group(1).upper() if status_m else ""
-            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS:\s*([A-Z]+)', raw, re.IGNORECASE)
-            busy_status = busy_m.group(1).upper() if busy_m else ""
-
             if status == "CANCELLED":
                 continue
 
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
-            summary = summary_m.replace('\\,', ',').replace('\\;', ';')
+            summary = summary.replace('\\,', ',').replace('\\;', ';')
 
             if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
                 continue
@@ -319,8 +319,8 @@ def update_calendar_data_sync():
                 target_start = None
                 target_end = None
 
-                # Evento normal (cualquier cita que solape con la ventana o el día)
-                if not rrule_m:
+                # Lógica EXACTA original de 'Proyecto A OK web':
+                if dt_end >= now_ba and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
                 elif rrule_m:
@@ -340,41 +340,40 @@ def update_calendar_data_sync():
                     if matches_recurrence:
                         cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
                         cand_end = cand_start + duration
-                        target_start = cand_start
-                        target_end = cand_end
+                        if cand_end >= now_ba and cand_start <= window_end_ba:
+                            target_start = cand_start
+                            target_end = cand_end
 
                 if target_start and target_end:
                     dur_min = int((target_end - target_start).total_seconds() / 60)
                     dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
                     
-                    event_dict = {
+                    events_window.append({
                         "title": summary,
                         "start": target_start.strftime("%H:%M"),
                         "end": target_end.strftime("%H:%M"),
                         "duration": dur_str,
-                        "start_dt": target_start,
-                        "end_dt": target_end,
                         "attendees": people,
                         "location": loc_str
-                    }
+                    })
 
-                    # Para la ventana próxima de 8h
-                    if target_end >= now_ba and target_start <= window_end_ba:
-                        events_window.append(event_dict)
-
-                    # Para el timeline de 8 a 17h
-                    if target_end >= day_start_ba and target_start <= day_end_ba:
-                        events_today_daytime.append(event_dict)
+                # Para el timeline de 8 a 17h del día de hoy:
+                t_s = target_start or (dt_start if dt_start.date() == now_ba.date() else None)
+                t_e = target_end or (dt_end if dt_start.date() == now_ba.date() else None)
+                if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
+                    timeline_events.append({
+                        "start_dt": t_s,
+                        "end_dt": t_e
+                    })
 
         events_window.sort(key=lambda x: x["start"])
-        events_today_daytime.sort(key=lambda x: x["start"])
         with CACHE_LOCK:
             CALENDAR_CACHE["events"] = events_window
-            CALENDAR_CACHE["today_all_events"] = events_today_daytime
+            CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[BG WORKER] Calendario actualizado: {len(events_window)} citas ventana, {len(events_today_daytime)} citas timeline 8-17h")
+        print(f"[CALENDAR] Actualizado: {len(events_window)} citas en ventana de 8h, {len(timeline_events)} en timeline")
     except Exception as e:
-        print(f"[BG WORKER] Error en calendario: {e}")
+        print(f"[CALENDAR] Error: {e}")
 
 def update_weather_data_sync():
     try:
@@ -793,20 +792,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 with CACHE_LOCK:
                     events = CALENDAR_CACHE.get("events", [])
                 body = json.dumps(events).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            elif self.path.startswith("/api/debug_calendar"):
-                with CACHE_LOCK:
-                    debug_copy = dict(CALENDAR_CACHE.get("debug", {}))
-                    debug_copy["events"] = CALENDAR_CACHE.get("events", [])
-                body = json.dumps(debug_copy, indent=2).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
