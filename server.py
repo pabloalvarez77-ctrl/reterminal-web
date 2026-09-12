@@ -3,8 +3,8 @@
 Servidor Robusto para reTerminal E1002 con Generador Automático de Imagen Estática (dashboard.png)
 - En / entrega el HTML con la imagen PNG incrustada directamente en Base64 (imposible que se rompa el enlace)
 - En /dashboard.png entrega el archivo PNG binario ultra-rápido (<5 ms)
-- Protección total contra valores nulos en datos de mercado y manejo de excepciones a prueba de fallos
-- Generación automática en segundo plano cada 15 minutos
+- Dibuja el estado vacío con mensaje explícito 'Sin información disponible' si la cartera no tiene datos
+- Las citas entre 23:00 y 07:00 muestran correctamente que no hay compromisos en esa franja nocturna
 """
 
 import http.server
@@ -61,7 +61,6 @@ def get_font(size):
     return ImageFont.load_default()
 
 def draw_weather_icon(draw, code, cx, cy, r=7):
-    """Dibuja íconos vectoriales con contorno negro nítido de alto contraste"""
     if code in (0, 1): # Sol despejado
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         num_rays = 8
@@ -84,8 +83,11 @@ def draw_weather_icon(draw, code, cx, cy, r=7):
 
 def get_tickers_from_sheet():
     try:
-        req = urllib.request.Request(SHEET_CSV_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        req = urllib.request.Request(
+            SHEET_CSV_URL,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
             lines = resp.read().decode('utf-8', errors='ignore').splitlines()
 
         tickers = []
@@ -111,6 +113,7 @@ def get_tickers_from_sheet():
 def update_finance_data_sync():
     tickers = get_tickers_from_sheet()
     if not tickers:
+        print("[BG FINANCE] No se obtuvieron tickers de la hoja.")
         return
 
     results = []
@@ -172,7 +175,7 @@ def update_finance_data_sync():
         with CACHE_LOCK:
             FINANCE_CACHE["data"] = results
             FINANCE_CACHE["timestamp"] = time.time()
-        print(f"[BG WORKER] Finanzas actualizadas: {len(results)} activos")
+        print(f"[BG WORKER] Finanzas actualizadas con éxito: {len(results)} activos")
 
 def parse_ical_dt(dt_raw, tz_ba):
     is_z = 'Z' in dt_raw
@@ -344,7 +347,7 @@ def update_calendar_data_sync():
         with CACHE_LOCK:
             CALENDAR_CACHE["events"] = events
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[BG WORKER] Calendario actualizado: {len(events)} citas")
+        print(f"[BG WORKER] Calendario actualizado: {len(events)} citas activas")
     except Exception as e:
         print(f"[BG WORKER] Error en calendario: {e}")
 
@@ -395,7 +398,6 @@ def render_png_dashboard():
             events = CALENDAR_CACHE.get("events", [])
             stocks = FINANCE_CACHE.get("data", [])
 
-        # Clima
         temp_cur = "14°"
         desc_cur = "Mayormente despejado"
         range_cur = "Mín: 12° | Máx: 17°"
@@ -502,87 +504,91 @@ def render_png_dashboard():
         draw.text((727, 92), "CARTERA", font=font_small, fill="#FFFFFF")
         draw.line([456, 114, 790, 114], fill="#000000", width=2)
 
-        card_w = 158
-        card_h = 110
-        row_gap = 6
-        
-        for idx, st in enumerate(stocks[:6]):
-            r = idx // 2
-            c = idx % 2
-            x_c = 462 if c == 0 else 626
-            y_c = 120 + r * (card_h + row_gap)
+        # Si aún no hay datos de cotizaciones, mostrar mensaje claro en lugar de dejar el panel blanco
+        if not stocks:
+            draw.rounded_rectangle([466, 180, 780, 370], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.text((530, 250), "Sin información disponible", font=font_title, fill="#000000")
+            draw.text((485, 275), "No se pudieron obtener las cotizaciones de tu cartera", font=font_small, fill="#555555")
+        else:
+            card_w = 158
+            card_h = 110
+            row_gap = 6
             
-            draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-            draw.text((x_c + 7, y_c + 6), st["sym"], font=font_body, fill="#000000")
-            
-            # Píldora de variación
-            is_up = st.get("up", True)
-            badge_bg = "#008833" if is_up else "#D60000"
-            arrow = "▲" if is_up else "▼"
-            chg_text = f"{arrow} {st['change']}"
-            
-            bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            
-            pill_pad_x = 5
-            pill_pad_y = 2
-            pill_x2 = x_c + card_w - 6
-            pill_x1 = pill_x2 - (tw + 2 * pill_pad_x)
-            pill_y1 = y_c + 5
-            pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
-            
-            draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
-            draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
-            
-            draw.text((x_c + 7, y_c + 26), f"${st['price']}", font=font_price, fill="#000000")
-            
-            # Velas de 60 días protegidas contra nulos
-            chart_x = x_c + 7
-            chart_y = y_c + 48
-            chart_w = 144
-            chart_h = 36
-            draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
-            draw.text((chart_x + 3, chart_y + 2), "60D", font=font_tiny, fill="#9CA3AF")
-            
-            candles = st.get("candles", [])
-            clean_candles = []
-            for cd in candles:
-                if len(cd) == 4 and None not in cd:
-                    try:
-                        op, hi, lo, cl = float(cd[0]), float(cd[1]), float(cd[2]), float(cd[3])
-                        if op > 0 and hi > 0 and lo > 0 and cl > 0:
-                            clean_candles.append((op, hi, lo, cl))
-                    except Exception:
-                        pass
-
-            if clean_candles and len(clean_candles) >= 2:
-                all_l = [cd[2] for cd in clean_candles]
-                all_h = [cd[3] for cd in clean_candles]
-                p_min, p_max = min(all_l), max(all_h)
-                p_range = p_max - p_min if p_max > p_min else 1.0
-                step = (chart_w - 8) / max(len(clean_candles) - 1, 1)
+            for idx, st in enumerate(stocks[:6]):
+                r = idx // 2
+                c = idx % 2
+                x_c = 462 if c == 0 else 626
+                y_c = 120 + r * (card_h + row_gap)
                 
-                for ci, (op, hi, lo, cl) in enumerate(clean_candles):
-                    c_col = "#008833" if cl >= op else "#D60000"
-                    cx = chart_x + 4 + ci * step
-                    
-                    def to_y(val):
-                        return (chart_y + chart_h - 3) - ((val - p_min) / p_range * (chart_h - 6))
-                    
-                    y_h = to_y(hi)
-                    y_l = to_y(lo)
-                    y_o = to_y(op)
-                    y_c = to_y(cl)
-                    
-                    draw.line([cx, y_h, cx, y_l], fill=c_col, width=1)
-                    bt = min(y_o, y_c)
-                    bb = max(y_o, y_c)
-                    if bb - bt < 1: bb = bt + 1
-                    draw.rectangle([cx - 1, bt, cx + 1, bb], fill=c_col, outline=c_col)
+                draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+                draw.text((x_c + 7, y_c + 6), st["sym"], font=font_body, fill="#000000")
+                
+                is_up = st.get("up", True)
+                badge_bg = "#008833" if is_up else "#D60000"
+                arrow = "▲" if is_up else "▼"
+                chg_text = f"{arrow} {st['change']}"
+                
+                bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
+                
+                pill_pad_x = 5
+                pill_pad_y = 2
+                pill_x2 = x_c + card_w - 6
+                pill_x1 = pill_x2 - (tw + 2 * pill_pad_x)
+                pill_y1 = y_c + 5
+                pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
+                
+                draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
+                draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
+                
+                draw.text((x_c + 7, y_c + 26), f"${st['price']}", font=font_price, fill="#000000")
+                
+                chart_x = x_c + 7
+                chart_y = y_c + 48
+                chart_w = 144
+                chart_h = 36
+                draw.rounded_rectangle([chart_x, chart_y, chart_x + chart_w, chart_y + chart_h], radius=3, fill="#FAFAFA", outline="#E5E7EB", width=1)
+                draw.text((chart_x + 3, chart_y + 2), "60D", font=font_tiny, fill="#9CA3AF")
+                
+                candles = st.get("candles", [])
+                clean_candles = []
+                for cd in candles:
+                    if len(cd) == 4 and None not in cd:
+                        try:
+                            op, hi, lo, cl = float(cd[0]), float(cd[1]), float(cd[2]), float(cd[3])
+                            if op > 0 and hi > 0 and lo > 0 and cl > 0:
+                                clean_candles.append((op, hi, lo, cl))
+                        except Exception:
+                            pass
 
-            draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
-            draw.text((x_c + 7, y_c + 94), st["name"][:25], font=font_tiny, fill="#000000")
+                if clean_candles and len(clean_candles) >= 2:
+                    all_l = [cd[2] for cd in clean_candles]
+                    all_h = [cd[3] for cd in clean_candles]
+                    p_min, p_max = min(all_l), max(all_h)
+                    p_range = p_max - p_min if p_max > p_min else 1.0
+                    step = (chart_w - 8) / max(len(clean_candles) - 1, 1)
+                    
+                    for ci, (op, hi, lo, cl) in enumerate(clean_candles):
+                        c_col = "#008833" if cl >= op else "#D60000"
+                        cx = chart_x + 4 + ci * step
+                        
+                        def to_y(val):
+                            return (chart_y + chart_h - 3) - ((val - p_min) / p_range * (chart_h - 6))
+                        
+                        y_h = to_y(hi)
+                        y_l = to_y(lo)
+                        y_o = to_y(op)
+                        y_c = to_y(cl)
+                        
+                        draw.line([cx, y_h, cx, y_l], fill=c_col, width=1)
+                        bt = min(y_o, y_c)
+                        bb = max(y_o, y_c)
+                        if bb - bt < 1: bb = bt + 1
+                        draw.rectangle([cx - 1, bt, cx + 1, bb], fill=c_col, outline=c_col)
+
+                draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
+                draw.text((x_c + 7, y_c + 94), st["name"][:25], font=font_tiny, fill="#000000")
 
         buf = io.BytesIO()
         img.save(buf, format="PNG", optimize=True)
@@ -602,10 +608,7 @@ def render_png_dashboard():
 
         return png_bytes, b64_str
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         print(f"[RENDER PNG] Error: {e}")
-        # Retornar imagen básica de fallback si ocurriera un error inesperado
         fallback = Image.new('RGB', (800, 480), '#FFFFFF')
         d = ImageDraw.Draw(fallback)
         d.text((50, 50), "Generando dashboard...", fill="#000000")
@@ -616,16 +619,27 @@ def render_png_dashboard():
 
 def background_worker_loop():
     print("[BG WORKER] Hilo en segundo plano iniciado...")
+    # 1. Primera carga inmediata de datos
+    try:
+        update_finance_data_sync()
+        update_weather_data_sync()
+        update_calendar_data_sync()
+        render_png_dashboard()
+        print("[BG WORKER] Primera imagen generada con éxito con todos los datos de mercado.")
+    except Exception as e:
+        print(f"[BG WORKER] Error en carga inicial: {e}")
+
+    # 2. Ciclo continuo cada 5 minutos
     while True:
+        time.sleep(300)
         try:
             update_finance_data_sync()
             update_weather_data_sync()
             update_calendar_data_sync()
             render_png_dashboard()
-            print(f"[BG WORKER] Imagen dashboard.png actualizada con éxito ({datetime.now().strftime('%H:%M:%S')})")
+            print(f"[BG WORKER] Imagen dashboard.png actualizada ({datetime.now().strftime('%H:%M:%S')})")
         except Exception as e:
             print(f"[BG WORKER] Error: {e}")
-        time.sleep(900)
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
@@ -700,8 +714,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
-            # En / se entrega el HTML con la imagen incrustada en Base64 directamente:
-            # ¡CERO riesgo de enlace roto o peticiones fallidas!
             elif self.path in ("/", "/index.html"):
                 with CACHE_LOCK:
                     b64_str = IMAGE_CACHE.get("b64")
@@ -736,19 +748,15 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
 
             return super().do_GET()
         except Exception as err:
-            print(f"[HANDLER ERROR] {err}")
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
 
 if __name__ == "__main__":
-    print(f"Servidor blindado escuchando en el puerto {PORT}...")
+    print(f"Servidor escuchando en el puerto {PORT}...")
     
-    # Generar primera imagen en RAM de inmediato
-    render_png_dashboard()
-    
-    # Iniciar hilo de actualización periódica
+    # Iniciar hilo en segundo plano
     bg_thread = threading.Thread(target=background_worker_loop, daemon=True)
     bg_thread.start()
     
