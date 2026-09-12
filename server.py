@@ -320,8 +320,8 @@ def update_calendar_data_sync():
                 loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
                 loc_str = loc_raw.replace("Reunión de Microsoft Teams", "Microsoft Teams").strip("; ")
 
-            dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
-            dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
+            dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:\s*([0-9TZ]+)', raw, re.IGNORECASE)
+            dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:\s*([0-9TZ]+)', raw, re.IGNORECASE)
             rrule_m = re.search(r'RRULE:(.*?)\r?\n', raw, re.IGNORECASE)
 
             if dtstart_m:
@@ -329,14 +329,18 @@ def update_calendar_data_sync():
                 if dtend_m:
                     dt_end = parse_ical_dt(dtend_m.group(1), tz_ba)
                 else:
-                    dt_end = dt_start + timedelta(minutes=30)
+                    dt_end = dt_start + timedelta(minutes=60)
+                
+                # Garantizar duración mínima de 60m para eventos puntuales/hitos
+                if dt_end <= dt_start:
+                    dt_end = dt_start + timedelta(minutes=60)
                 duration = dt_end - dt_start
 
                 target_start = None
                 target_end = None
 
-                # Lógica EXACTA original de 'Proyecto A OK web':
-                if dt_end >= now_ba and dt_start <= window_end_ba:
+                # Captura con ventana de permanencia de 45 minutos (citas en curso no desaparecen)
+                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
                 elif rrule_m:
