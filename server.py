@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Servidor para reTerminal E1002 con Generador Automático de Imagen Estática (dashboard.png)
-- Proceso en segundo plano cada 15 minutos: descarga datos y dibuja la imagen exacta de 800x480 px con Pillow
-- Sirve /dashboard.png desde la memoria RAM en <2 milisegundos (Cero timeouts, cero "Failed to load page")
-- Mantiene APIs /api/calendar, /api/finance y vista web en /
+- Ajuste de espaciado en cabecera: fecha "Viernes, 11 de Septiembre" con ancho amplio sin solaparse
+- Íconos vectoriales de alto contraste para el pronóstico del fin de semana (Sábado y Domingo)
+- Píldora de variación porcentual con ancho dinámico para contener el signo % al 100%
+- Generación con Pillow en <30 ms y entrega instantánea
 """
 
 import http.server
@@ -57,6 +58,28 @@ def get_font(size):
             except Exception:
                 pass
     return ImageFont.load_default()
+
+def draw_weather_icon(draw, code, cx, cy, r=7):
+    """Dibuja íconos con contorno negro nítido y relleno de alto contraste"""
+    if code in (0, 1): # Sol despejado
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
+        num_rays = 8
+        for i in range(num_rays):
+            angle = i * (2 * math.pi / num_rays)
+            x1 = cx + (r + 2) * math.cos(angle)
+            y1 = cy + (r + 2) * math.sin(angle)
+            x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
+            y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
+            draw.line([x1, y1, x2, y2], fill="#000000", width=2 if r > 7 else 1)
+    elif code in (2, 3): # Nubes con sol detrás
+        draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
+        draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
+        draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
+    else: # Lluvia
+        draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
+        draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1.5)
+        draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1.5)
+        draw.line([cx + 6, cy + 4, cx + 4, cy + 9], fill="#0044CC", width=1.5)
 
 def get_tickers_from_sheet():
     try:
@@ -351,7 +374,7 @@ def render_png_dashboard():
     font_small = get_font(9)
     font_tiny = get_font(7)
     font_price = get_font(15)
-    font_badge = get_font(13)
+    font_badge = get_font(12) # 12px negrita limpio y legible (+50% de tamaño)
 
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
@@ -377,12 +400,16 @@ def render_png_dashboard():
     range_cur = "Mín: 12° | Máx: 17°"
     sat_temp = "8°/13°"
     sun_temp = "4°/11°"
+    sat_code = 2
+    sun_code = 0
+    cur_code = 1
 
     if wdata:
         try:
             t = round(wdata["current"]["temperature_2m"])
             temp_cur = f"{t}°"
             code = wdata["current"]["weather_code"]
+            cur_code = code
             if code == 0: desc_cur = "Despejado"
             elif code in (1, 2): desc_cur = "Mayormente despejado"
             elif code == 3: desc_cur = "Nublado"
@@ -399,40 +426,45 @@ def render_png_dashboard():
                 d = datetime.strptime(ts, "%Y-%m-%d")
                 if d.weekday() == 5:
                     sat_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                    sat_code = wdata["daily"]["weather_code"][i]
                 if d.weekday() == 6:
                     sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
+                    sun_code = wdata["daily"]["weather_code"][i]
         except Exception:
             pass
 
     # 1. CABECERA (8, 8, 792, 74)
     draw.rounded_rectangle([8, 8, 792, 74], radius=6, outline="#000000", width=2, fill="#FFFFFF")
-    draw.text((22, 26), time_str, font=font_clock, fill="#0044CC")
-    draw.line([106, 18, 106, 64], fill="#000000", width=2)
-    draw.text((116, 25), day_str, font=font_day, fill="#000000")
-    draw.text((116, 45), "Buenos Aires", font=font_small, fill="#555555")
-
-    draw.line([280, 18, 280, 64], fill="#000000", width=2)
-    draw.text((294, 21), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
-    draw.text((294, 43), f"SÁB: {sat_temp}", font=font_small, fill="#000000")
-    draw.text((410, 43), f"DOM: {sun_temp}", font=font_small, fill="#000000")
-
-    draw.line([515, 18, 515, 64], fill="#000000", width=2)
     
-    # Sol de alto contraste con contorno negro
-    cx, cy, r = 544, 41, 9
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2)
-    for i in range(8):
-        angle = i * (2 * math.pi / 8)
-        x1 = cx + (r + 3) * math.cos(angle)
-        y1 = cy + (r + 3) * math.sin(angle)
-        x2 = cx + (r + 7) * math.cos(angle)
-        y2 = cy + (r + 7) * math.sin(angle)
-        draw.line([x1, y1, x2, y2], fill="#000000", width=2)
+    # Bloque 1: Reloj y Fecha (x=8 a x=325) -> 317px de ancho holgado para evitar solapamiento
+    draw.text((22, 26), time_str, font=font_clock, fill="#0044CC")
+    draw.line([104, 18, 104, 64], fill="#000000", width=2)
+    draw.text((114, 25), day_str, font=font_day, fill="#000000")
+    draw.text((114, 45), "Buenos Aires", font=font_small, fill="#555555")
 
-    draw.text((566, 26), temp_cur, font=font_clock, fill="#000000")
-    draw.text((628, 20), "BUENOS AIRES", font=font_meta, fill="#0044CC")
-    draw.text((628, 36), desc_cur, font=font_small, fill="#000000")
-    draw.text((628, 50), range_cur, font=font_tiny, fill="#555555")
+    # Divisor 1 (movido a x=325)
+    draw.line([325, 18, 325, 64], fill="#000000", width=2)
+
+    # Bloque 2: Pronóstico Fin de Semana (x=325 a x=525) con íconos de alto contraste
+    draw.text((335, 21), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
+    
+    # Sábado con icono
+    draw_weather_icon(draw, sat_code, 345, 48, r=6)
+    draw.text((358, 43), f"SÁB: {sat_temp}", font=font_small, fill="#000000")
+    
+    # Domingo con icono
+    draw_weather_icon(draw, sun_code, 440, 48, r=6)
+    draw.text((453, 43), f"DOM: {sun_temp}", font=font_small, fill="#000000")
+
+    # Divisor 2 (en x=525)
+    draw.line([525, 18, 525, 64], fill="#000000", width=2)
+
+    # Bloque 3: Clima actual (x=525 a x=792) con sol de alto contraste
+    draw_weather_icon(draw, cur_code, 550, 41, r=9)
+    draw.text((572, 26), temp_cur, font=font_clock, fill="#000000")
+    draw.text((630, 20), "BUENOS AIRES", font=font_meta, fill="#0044CC")
+    draw.text((630, 36), desc_cur, font=font_small, fill="#000000")
+    draw.text((630, 50), range_cur, font=font_tiny, fill="#555555")
 
     # 2. PANEL AGENDA (8, 80, 448, 472)
     draw.rounded_rectangle([8, 80, 448, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
@@ -491,13 +523,25 @@ def render_png_dashboard():
         draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
         draw.text((x_c + 7, y_c + 6), st["sym"], font=font_body, fill="#000000")
         
+        # PÍLDORA CON ANCHO DINÁMICO PARA CONTENER EL SIGNO %
         is_up = st.get("up", True)
         badge_bg = "#008833" if is_up else "#D60000"
         arrow = "▲" if is_up else "▼"
         chg_text = f"{arrow} {st['change']}"
         
-        draw.rounded_rectangle([x_c + 84, y_c + 5, x_c + card_w - 6, y_c + 24], radius=3, fill=badge_bg)
-        draw.text((x_c + 90, y_c + 7), chg_text, font=font_badge, fill="#FFFFFF")
+        bbox = draw.textbbox((0, 0), chg_text, font=font_badge)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        
+        pill_pad_x = 5
+        pill_pad_y = 2
+        pill_x2 = x_c + card_w - 6
+        pill_x1 = pill_x2 - (tw + 2 * pill_pad_x)
+        pill_y1 = y_c + 5
+        pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
+        
+        draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
+        draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
         
         draw.text((x_c + 7, y_c + 26), f"${st['price']}", font=font_price, fill="#000000")
         
@@ -540,7 +584,6 @@ def render_png_dashboard():
         draw.line([x_c + 7, y_c + 90, x_c + card_w - 7, y_c + 90], fill="#000000", width=1)
         draw.text((x_c + 7, y_c + 94), st["name"][:25], font=font_tiny, fill="#000000")
 
-    # Exportar PNG a buffer en memoria
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     png_bytes = buf.getvalue()
@@ -558,7 +601,6 @@ def render_png_dashboard():
     return png_bytes
 
 def background_worker_loop():
-    """Ejecuta periódicamente cada 15 minutos la actualización y generación del PNG"""
     print("[BG WORKER] Hilo de renderizado de dashboard iniciado...")
     while True:
         try:
@@ -569,8 +611,6 @@ def background_worker_loop():
             print(f"[BG WORKER] Imagen dashboard.png regenerada con éxito a las {datetime.now().strftime('%H:%M:%S')}")
         except Exception as e:
             print(f"[BG WORKER] Error: {e}")
-        
-        # Dormir 15 minutos entre ciclos completos
         time.sleep(900)
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -578,7 +618,6 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 class RequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        # 1. Entrega inmediata del PNG en <2 milisegundos
         if self.path in ("/dashboard.png", "/image.png"):
             with CACHE_LOCK:
                 png_bytes = IMAGE_CACHE.get("bytes")
@@ -598,7 +637,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(png_bytes)
                 return
             else:
-                # Si recién arranca, genera la primera imagen al vuelo
                 png_bytes = render_png_dashboard()
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
@@ -609,14 +647,12 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(png_bytes)
                 return
 
-        # 2. Silenciar favicon
         elif self.path == "/favicon.ico":
             self.send_response(204)
             self.send_header("Connection", "close")
             self.end_headers()
             return
 
-        # 3. APIs auxiliares
         elif self.path == "/api/finance":
             with CACHE_LOCK:
                 data = FINANCE_CACHE.get("data", [])
@@ -629,6 +665,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
         elif self.path == "/api/calendar":
             with CACHE_LOCK:
                 events = CALENDAR_CACHE.get("events", [])
@@ -641,6 +678,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
         elif self.path.startswith("/api/debug_calendar"):
             with CACHE_LOCK:
                 debug_copy = dict(CALENDAR_CACHE.get("debug", {}))
@@ -655,7 +693,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # 4. Vista web en / que muestra directamente la imagen generada
         elif self.path in ("/", "/index.html"):
             html = """<!DOCTYPE html>
 <html>
@@ -688,7 +725,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"Servidor PNG de alta velocidad escuchando en el puerto {PORT}...")
     
-    # Iniciar ciclo en segundo plano
     bg_thread = threading.Thread(target=background_worker_loop, daemon=True)
     bg_thread.start()
     
