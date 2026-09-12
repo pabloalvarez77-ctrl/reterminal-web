@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Servidor de Alta Legibilidad para reTerminal E1002 (Spectra 6)
-- Tipografía optimizada para tinta electrónica: piso mínimo de 10px en negrita
-- Eliminación de texto gris (#555555) que se difumina por tramado: todo el texto secundario en negro puro (#000000)
-- Píldora de duración de reuniones ampliada con texto blanco de 10px perfectamente legible
-- Leyendas de temperatura mínima/máxima y nombres de activos legibles desde cualquier distancia
-- Entrega instantánea en /dashboard.png y /
+Servidor Definitivo para reTerminal E1002 (Spectra 6)
+- Generación automática de imagen estática PNG (800x480 px) cada 15 minutos en segundo plano
+- Cabecera: Más espacio para la descripción del clima (eliminado 'BUENOS AIRES' redundante a la derecha)
+- Timeline de la jornada (8 a 17 hs) con marcas cada 1 hora, etiquetas cada 3 horas (08h, 11h, 14h, 17h) y zonas rojo/verde
+- Citas (Propuesta A): Horario y título al mismo nivel con fuente ampliada (13px negrita)
+- Finanzas: 6 activos con velas de 60 días, variación diaria con signo % garantizado y protección contra nulos
+- Entrega inmediata en /dashboard.png y / con imagen Base64 incrustada (cero riesgo de desconexión)
 """
 
 import http.server
@@ -40,7 +41,7 @@ EXCLUDED_TITLES = ["proyecto 90k", "graciela maestra pedro", "cancelado", "cance
 
 # Memoria RAM compartida
 CACHE_LOCK = threading.Lock()
-CALENDAR_CACHE = {"events": [], "debug": {}, "timestamp": 0}
+CALENDAR_CACHE = {"events": [], "today_all_events": [], "debug": {}, "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
 WEATHER_CACHE = {"data": None, "timestamp": 0}
 IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
@@ -63,7 +64,7 @@ def get_font(size):
     return ImageFont.load_default()
 
 def draw_weather_icon(draw, code, cx, cy, r=7):
-    """Dibuja íconos vectoriales con contorno negro nítido de alto contraste"""
+    """Dibuja íconos vectoriales con contorno negro nítido de alto contraste (grosores enteros)"""
     if code in (0, 1): # Sol despejado
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         num_rays = 8
@@ -73,12 +74,12 @@ def draw_weather_icon(draw, code, cx, cy, r=7):
             y1 = cy + (r + 2) * math.sin(angle)
             x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
             y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
-            draw.line([x1, y1, x2, y2], fill="#000000", width=2 if r > 7 else 1)
+            draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
     elif code in (2, 3): # Nubes con sol
         draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
         draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
-    else: # Lluvia (ancho entero width=1)
+    else: # Lluvia (grosor entero width=1)
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
         draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
@@ -250,7 +251,11 @@ def update_calendar_data_sync():
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
-    events = []
+    day_start_ba = now_ba.replace(hour=8, minute=0, second=0, microsecond=0)
+    day_end_ba = now_ba.replace(hour=17, minute=0, second=0, microsecond=0)
+    
+    events_window = []
+    events_today_daytime = []
 
     try:
         req = urllib.request.Request(
@@ -314,7 +319,8 @@ def update_calendar_data_sync():
                 target_start = None
                 target_end = None
 
-                if dt_end >= now_ba and dt_start <= window_end_ba:
+                # Caso evento de hoy
+                if dt_start.date() == now_ba.date():
                     target_start = dt_start
                     target_end = dt_end
                 elif rrule_m:
@@ -334,27 +340,39 @@ def update_calendar_data_sync():
                     if matches_recurrence:
                         cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
                         cand_end = cand_start + duration
-                        if cand_end >= now_ba and cand_start <= window_end_ba:
-                            target_start = cand_start
-                            target_end = cand_end
+                        target_start = cand_start
+                        target_end = cand_end
 
                 if target_start and target_end:
                     dur_min = int((target_end - target_start).total_seconds() / 60)
                     dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
-                    events.append({
+                    
+                    event_dict = {
                         "title": summary,
                         "start": target_start.strftime("%H:%M"),
                         "end": target_end.strftime("%H:%M"),
                         "duration": dur_str,
+                        "start_dt": target_start,
+                        "end_dt": target_end,
                         "attendees": people,
                         "location": loc_str
-                    })
+                    }
 
-        events.sort(key=lambda x: x["start"])
+                    # Para la ventana próxima de 8h
+                    if target_end >= now_ba and target_start <= window_end_ba:
+                        events_window.append(event_dict)
+
+                    # Para el timeline de 8 a 17h
+                    if target_end >= day_start_ba and target_start <= day_end_ba:
+                        events_today_daytime.append(event_dict)
+
+        events_window.sort(key=lambda x: x["start"])
+        events_today_daytime.sort(key=lambda x: x["start"])
         with CACHE_LOCK:
-            CALENDAR_CACHE["events"] = events
+            CALENDAR_CACHE["events"] = events_window
+            CALENDAR_CACHE["today_all_events"] = events_today_daytime
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[BG WORKER] Calendario actualizado: {len(events)} citas activas")
+        print(f"[BG WORKER] Calendario actualizado: {len(events_window)} citas ventana, {len(events_today_daytime)} citas timeline 8-17h")
     except Exception as e:
         print(f"[BG WORKER] Error en calendario: {e}")
 
@@ -378,16 +396,20 @@ def render_png_dashboard():
         img = Image.new('RGB', (width, height), color='#FFFFFF')
         draw = ImageDraw.Draw(img)
 
-        # NUEVA ESCALA DE ALTA LEGIBILIDAD (Piso mínimo de 10px en negrita)
+        # Tipografías optimizadas
         font_clock = get_font(26)
         font_day = get_font(13)
         font_meta = get_font(10)
         font_title = get_font(13)
         font_body = get_font(12)
-        font_label = get_font(10)   # Antes 7px! Ahora 10px (+43% mayor y nítido)
-        font_pill = get_font(10)    # Para la duración de reuniones
+        font_label = get_font(10)
         font_price = get_font(15)
         font_badge = get_font(12)
+        font_t_big = get_font(13)
+        font_time = get_font(12)
+        font_tick = get_font(9.5)
+        font_desc_clima = get_font(12)
+        font_range_clima = get_font(10.5)
 
         tz_ba = timezone(timedelta(hours=-3))
         now_ba = datetime.now(tz_ba)
@@ -404,6 +426,7 @@ def render_png_dashboard():
         with CACHE_LOCK:
             wdata = WEATHER_CACHE.get("data")
             events = CALENDAR_CACHE.get("events") or []
+            timeline_events = CALENDAR_CACHE.get("today_all_events") or []
             stocks = FINANCE_CACHE.get("data") or []
 
         temp_cur = "14°"
@@ -444,7 +467,7 @@ def render_png_dashboard():
             except Exception:
                 pass
 
-        # 1. CABECERA
+        # 1. CABECERA (Ajuste aprobado: sin BUENOS AIRES a la derecha)
         draw.rounded_rectangle([8, 8, 792, 74], radius=6, outline="#000000", width=2, fill="#FFFFFF")
         draw.text((20, 24), time_str, font=font_clock, fill="#0044CC")
         draw.line([104, 16, 104, 66], fill="#000000", width=2)
@@ -453,20 +476,20 @@ def render_png_dashboard():
 
         draw.line([325, 16, 325, 66], fill="#000000", width=2)
 
+        # Pronóstico Fin de Semana
         draw.text((335, 20), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
         draw_weather_icon(draw, sat_code, 345, 48, r=6)
         draw.text((358, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
-        
         draw_weather_icon(draw, sun_code, 440, 48, r=6)
         draw.text((453, 42), f"DOM: {sun_temp}", font=font_label, fill="#000000")
 
         draw.line([525, 16, 525, 66], fill="#000000", width=2)
 
-        draw_weather_icon(draw, cur_code, 548, 41, r=9)
-        draw.text((568, 24), temp_cur, font=font_clock, fill="#000000")
-        draw.text((626, 18), "BUENOS AIRES", font=font_meta, fill="#0044CC")
-        draw.text((626, 34), desc_cur, font=font_label, fill="#000000")
-        draw.text((626, 49), range_cur, font=font_label, fill="#000000")
+        # Clima actual ampliado
+        draw_weather_icon(draw, cur_code, 550, 41, r=10)
+        draw.text((572, 24), temp_cur, font=font_clock, fill="#000000")
+        draw.text((634, 27), desc_cur, font=font_desc_clima, fill="#000000")
+        draw.text((634, 48), range_cur, font=font_range_clima, fill="#0044CC")
 
         # 2. PANEL AGENDA
         draw.rounded_rectangle([8, 80, 448, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
@@ -475,40 +498,104 @@ def render_png_dashboard():
         draw.text((332, 92), window_str, font=font_meta, fill="#FFFFFF")
         draw.line([10, 114, 446, 114], fill="#000000", width=2)
 
+        # =========================================================================
+        # TIMELINE DE 8 A 17 HS (Marcas cada 1h, etiquetas cada 3h, sin leyendas)
+        # =========================================================================
+        tl_x = 16
+        tl_y = 122
+        tl_w = 424
+        tl_h = 16
+
+        # Base VERDE (#008833) = Tiempo disponible
+        draw.rounded_rectangle([tl_x, tl_y, tl_x + tl_w, tl_y + tl_h], radius=3, fill="#008833", outline="#000000", width=1)
+
+        def time_to_tl_x(hh, mm):
+            mins = (hh - 8) * 60 + mm
+            ratio = max(0.0, min(1.0, mins / 540.0))
+            return int(tl_x + ratio * tl_w)
+
+        # Bloques ocupados en ROJO (#D60000) calculados a partir de las citas del día
+        for ev in timeline_events:
+            s_dt = ev.get("start_dt")
+            e_dt = ev.get("end_dt")
+            if s_dt and e_dt:
+                x_start = time_to_tl_x(s_dt.hour, s_dt.minute)
+                x_end = time_to_tl_x(e_dt.hour, e_dt.minute)
+                if x_end > x_start:
+                    draw.rectangle([x_start, tl_y + 1, x_end, tl_y + tl_h - 1], fill="#D60000")
+
+        # Marcas cada 1 hora (8 a 17 hs) con etiquetas cada 3 horas (08h, 11h, 14h, 17h)
+        labeled_hours = {8, 11, 14, 17}
+        for h in range(8, 18):
+            hx = time_to_tl_x(h, 0)
+            is_major = h in labeled_hours
+            tick_bottom = tl_y + tl_h + (4 if is_major else 2)
+            draw.line([hx, tl_y, hx, tick_bottom], fill="#000000", width=1)
+
+            if is_major:
+                h_str = f"{h:02d}h"
+                bbox_h = draw.textbbox((0, 0), h_str, font=font_tick)
+                hw = int(bbox_h[2] - bbox_h[0])
+                if h == 8:
+                    tx = hx
+                elif h == 17:
+                    tx = hx - hw
+                else:
+                    tx = hx - hw // 2
+                draw.text((tx, tl_y + tl_h + 5), h_str, font=font_tick, fill="#000000")
+
+        # Marcador de hora actual ("AHORA") si estamos dentro de la franja de 8 a 17h
+        cur_hour = now_ba.hour
+        cur_min = now_ba.minute
+        if 8 <= cur_hour <= 17:
+            now_x = time_to_tl_x(cur_hour, cur_min)
+            draw.line([now_x, tl_y - 4, now_x, tl_y + tl_h + 2], fill="#000000", width=2)
+            draw.polygon([(now_x - 3, tl_y - 5), (now_x + 3, tl_y - 5), (now_x, tl_y - 1)], fill="#000000")
+
+        # Línea divisoria bajo el timeline
+        draw.line([12, tl_y + 34, 444, tl_y + 34], fill="#E5E7EB", width=1)
+
+        # =========================================================================
+        # REUNIONES FORMATO "PROPUESTA A" (Horario y Título al mismo nivel)
+        # =========================================================================
         if not events:
-            draw.rounded_rectangle([20, 160, 436, 380], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-            draw.text((120, 250), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
-            draw.text((95, 275), "Tu calendario no registra compromisos en este período", font=font_label, fill="#000000")
+            draw.rounded_rectangle([20, tl_y + 50, 436, 455], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.text((120, tl_y + 110), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
+            draw.text((95, tl_y + 135), "Tu calendario no registra compromisos en este período", font=font_label, fill="#000000")
         else:
-            y_evt = 120
-            is_roomy = len(events) <= 4
-            card_h = 68 if is_roomy else 52
-            gap = 6 if is_roomy else 4
+            y_card = tl_y + 40
+            card_h = 50
+            gap = 6
             
             for evt in events[:6]:
-                draw.rounded_rectangle([16, y_evt, 440, y_evt + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
-                draw.rectangle([16, y_evt, 21, y_evt + card_h], fill="#0044CC")
+                draw.rounded_rectangle([16, y_card, 440, y_card + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+                draw.rectangle([16, y_card, 21, y_card + card_h], fill="#0044CC")
                 
                 s_val = str(evt.get('start') or '--:--')
                 e_val = str(evt.get('end') or '--:--')
-                draw.text((28, y_evt + 5), f"{s_val} – {e_val}", font=font_body, fill="#0044CC")
-                
+                t_full = f"{s_val} – {e_val}"
                 dur = str(evt.get("duration") or "30m")
-                bbox_d = draw.textbbox((0, 0), dur, font=font_pill)
+                t_str = str(evt.get("title") or "Reunión")[:25]
+
+                # Fila 1: Horario + Título grande en negrita (13px) al mismo nivel
+                draw.text((28, y_card + 5), t_full, font=font_time, fill="#0044CC")
+                draw.text((120, y_card + 4), "•", font=font_time, fill="#888888")
+                draw.text((130, y_card + 4), t_str, font=font_t_big, fill="#000000")
+                
+                # Pastilla de duración a la derecha
+                bbox_d = draw.textbbox((0, 0), dur, font=font_label)
                 dw = int(bbox_d[2] - bbox_d[0])
-                pill_w = max(dw + 10, 36)
-                draw.rounded_rectangle([432 - pill_w, y_evt + 5, 432, y_evt + 21], radius=3, fill="#000000")
-                draw.text((432 - pill_w + 5, y_evt + 6), dur, font=font_pill, fill="#FFFFFF")
+                pw = max(dw + 8, 30)
+                draw.rounded_rectangle([432 - pw, y_card + 5, 432, y_card + 19], radius=2, fill="#000000")
+                draw.text((432 - pw + 4, y_card + 6), dur, font=font_label, fill="#FFFFFF")
                 
-                t_str = str(evt.get("title") or "Reunión")[:38]
-                draw.text((28, y_evt + 24), t_str, font=font_body, fill="#000000")
-                
+                # Fila 2: Detalles (Ubicación / Asistente) en negro sólido
                 sub = str(evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in t_str.lower() else "📍 Microsoft Teams"))
                 if evt.get("attendees"):
                     sub = f"👤 {', '.join(str(a) for a in evt['attendees'])}"
-                draw.text((28, y_evt + (45 if is_roomy else 38)), sub[:42], font=font_label, fill="#000000")
+                draw.text((28, y_card + 28), sub[:48], font=font_label, fill="#000000")
                 
-                y_evt += card_h + gap
+                y_card += card_h + gap
 
         # 3. PANEL FINANZAS
         draw.rounded_rectangle([454, 80, 792, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
@@ -523,16 +610,16 @@ def render_png_dashboard():
             draw.text((485, 275), "No se pudieron obtener las cotizaciones de tu cartera", font=font_label, fill="#000000")
         else:
             card_w = 158
-            card_h = 110
-            row_gap = 6
+            card_h_st = 110
+            row_gap_st = 6
             
             for idx, st in enumerate(stocks[:6]):
                 r = idx // 2
                 c = idx % 2
                 x_c = 462 if c == 0 else 626
-                y_c = 120 + r * (card_h + row_gap)
+                y_c = 120 + r * (card_h_st + row_gap_st)
                 
-                draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+                draw.rounded_rectangle([x_c, y_c, x_c + card_w, y_c + card_h_st], radius=4, outline="#000000", width=1, fill="#FFFFFF")
                 sym_str = str(st.get("sym") or "")
                 draw.text((x_c + 7, y_c + 6), sym_str, font=font_body, fill="#000000")
                 
