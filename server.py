@@ -80,9 +80,9 @@ def draw_weather_icon(draw, code, cx, cy, r=7):
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
     else: # Lluvia
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
-        draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1.5)
-        draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1.5)
-        draw.line([cx + 6, cy + 4, cx + 4, cy + 9], fill="#0044CC", width=1.5)
+        draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
+        draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
+        draw.line([cx + 6, cy + 4, cx + 4, cy + 9], fill="#0044CC", width=1)
 
 def get_tickers_from_sheet():
     try:
@@ -544,10 +544,10 @@ def render_png_dashboard():
                 
                 pill_pad_x = 5
                 pill_pad_y = 2
-                pill_x2 = x_c + card_w - 6
-                pill_x1 = max(pill_x2 - (tw + 2 * pill_pad_x), x_c + 60)
-                pill_y1 = y_c + 5
-                pill_y2 = pill_y1 + th + 2 * pill_pad_y + 3
+                pill_x2 = int(x_c + card_w - 6)
+                pill_x1 = int(max(pill_x2 - (tw + 2 * pill_pad_x), x_c + 60))
+                pill_y1 = int(y_c + 5)
+                pill_y2 = int(pill_y1 + th + 2 * pill_pad_y + 3)
                 
                 draw.rounded_rectangle([pill_x1, pill_y1, pill_x2, pill_y2], radius=3, fill=badge_bg)
                 draw.text((pill_x1 + pill_pad_x, pill_y1 + pill_pad_y), chg_text, font=font_badge, fill="#FFFFFF")
@@ -582,10 +582,10 @@ def render_png_dashboard():
                     
                     for ci, (op, hi, lo, cl) in enumerate(clean_candles):
                         c_col = "#008833" if cl >= op else "#D60000"
-                        cx = chart_x + 4 + ci * step
+                        cx = int(chart_x + 4 + ci * step)
                         
                         def to_y(val):
-                            return (chart_y + chart_h - 3) - ((val - p_min) / p_range * (chart_h - 6))
+                            return int((chart_y + chart_h - 3) - ((val - p_min) / p_range * (chart_h - 6)))
                         
                         y_h = to_y(hi)
                         y_l = to_y(lo)
