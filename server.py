@@ -329,18 +329,14 @@ def update_calendar_data_sync():
                 if dtend_m:
                     dt_end = parse_ical_dt(dtend_m.group(1), tz_ba)
                 else:
-                    dt_end = dt_start + timedelta(minutes=60)
-                
-                # Garantizar duración mínima de 60m para eventos puntuales/hitos
-                if dt_end <= dt_start:
-                    dt_end = dt_start + timedelta(minutes=60)
+                    dt_end = dt_start + timedelta(minutes=30)
                 duration = dt_end - dt_start
 
                 target_start = None
                 target_end = None
 
-                # Captura con ventana de permanencia de 45 minutos (citas en curso no desaparecen)
-                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
+                # Ventana estándar de las próximas 8 horas (finaliza estrictamente al término de la cita)
+                if dt_end >= now_ba and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
                 elif rrule_m:
@@ -395,6 +391,63 @@ def update_calendar_data_sync():
     except Exception as e:
         print(f"[CALENDAR] Error: {e}")
 
+WEATHER_TRANSLATIONS = {
+    "clear": "Despejado",
+    "sunny": "Soleado",
+    "partly cloudy": "Parcialmente nublado",
+    "cloudy": "Nublado",
+    "overcast": "Cubierto",
+    "mist": "Neblina",
+    "fog": "Niebla",
+    "freezing fog": "Niebla helada",
+    "patchy rain nearby": "Llovizna dispersa",
+    "patchy light drizzle": "Llovizna ligera",
+    "light drizzle": "Llovizna ligera",
+    "freezing drizzle": "Llovizna helada",
+    "heavy freezing drizzle": "Llovizna helada fuerte",
+    "patchy light rain": "Lluvia ligera",
+    "light rain": "Lluvia ligera",
+    "moderate rain at times": "Lluvia moderada",
+    "moderate rain": "Lluvia moderada",
+    "heavy rain at times": "Lluvia fuerte",
+    "heavy rain": "Lluvia fuerte",
+    "light freezing rain": "Lluvia helada",
+    "moderate or heavy freezing rain": "Lluvia helada fuerte",
+    "light sleet": "Aguanieve ligera",
+    "moderate or heavy sleet": "Aguanieve",
+    "patchy light snow": "Nevada ligera",
+    "light snow": "Nieve ligera",
+    "patchy moderate snow": "Nieve moderada",
+    "moderate snow": "Nieve moderada",
+    "patchy heavy snow": "Nevada fuerte",
+    "heavy snow": "Nevada fuerte",
+    "ice pellets": "Granizo",
+    "light rain shower": "Chubascos ligeros",
+    "moderate or heavy rain shower": "Chaparrones",
+    "torrential rain shower": "Chaparrones torrenciales",
+    "light sleet showers": "Aguanieve",
+    "moderate or heavy sleet showers": "Aguanieve fuerte",
+    "light snow showers": "Chubascos de nieve",
+    "moderate or heavy snow showers": "Nevadas",
+    "light showers of ice pellets": "Granizo ligero",
+    "moderate or heavy showers of ice pellets": "Granizo",
+    "patchy light rain with thunder": "Tormenta aislada",
+    "moderate or heavy rain with thunder": "Tormenta eléctrica",
+    "thundery outbreaks in nearby": "Tormenta aislada",
+    "thunderstorm": "Tormenta eléctrica"
+}
+
+def translate_weather_to_spanish(desc_text, is_day=True):
+    if not desc_text:
+        return "Despejado" if is_day else "Cielo claro"
+    clean = str(desc_text).strip().lower()
+    if clean in WEATHER_TRANSLATIONS:
+        return WEATHER_TRANSLATIONS[clean]
+    for eng, esp in WEATHER_TRANSLATIONS.items():
+        if eng in clean:
+            return esp
+    return str(desc_text).capitalize()
+
 def update_weather_data_sync():
     """Consulta la estación meteorológica oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
     weather_result = None
@@ -417,7 +470,7 @@ def update_weather_data_sync():
     # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in
     if not weather_result:
         try:
-            url_fallback = 'https://wttr.in/SABE?format=j1'
+            url_fallback = 'https://wttr.in/SABE?format=j1&lang=es'
             req_fb = urllib.request.Request(
                 url_fallback,
                 headers={'User-Agent': 'curl/7.88.1'}
@@ -520,8 +573,9 @@ def render_png_dashboard():
                 if "is_day" in wdata["current"]:
                     is_day = bool(wdata["current"]["is_day"])
 
-                if "desc_text" in wdata["current"]:
-                    desc_cur = wdata["current"]["desc_text"][:24]
+                raw_desc = wdata["current"].get("desc_text")
+                if raw_desc:
+                    desc_cur = translate_weather_to_spanish(raw_desc, is_day)[:24]
                 else:
                     if code == 0: desc_cur = "Despejado" if is_day else "Cielo claro"
                     elif code in (1, 2): desc_cur = "Mayormente despejado" if is_day else "Parcialmente nublado"
