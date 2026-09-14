@@ -49,7 +49,10 @@ EXCLUDED_TITLES = [
     "recap global producto",
     "cancelado",
     "canceled",
-    "rechazado"
+    "rechazado",
+    "tiempo de concentración",
+    "tiempo de concentracion",
+    "focus time"
 ]
 
 # Memoria RAM compartida
