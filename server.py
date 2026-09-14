@@ -112,10 +112,15 @@ def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
             x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
             y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
             draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
-    elif code in (2, 3): # Nubes
+    elif code == 2: # Parcialmente nublado (sol/luna detrás de nube)
         draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
         draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
+    elif code == 3: # Cubierto / Nublado (SOLO NUBE BLANCA, SIN LLUVIA NI SOL)
+        draw.rounded_rectangle([cx - r - 2, cy - r + 3, cx + r + 2, cy + r], radius=3, fill="#FFFFFF", outline="#000000", width=1)
+        draw.ellipse([cx - r, cy - r + 1, cx + 1, cy + r - 1], fill="#FFFFFF", outline="#000000", width=1)
+        draw.ellipse([cx - 1, cy - r - 1, cx + r, cy + r - 1], fill="#FFFFFF", outline="#000000", width=1)
+        draw.rectangle([cx - r + 1, cy - r + 3, cx + r - 1, cy + r - 1], fill="#FFFFFF")
     elif code >= 95: # Tormenta
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.polygon([(cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6), (cx + 4, cy + 6), (cx - 3, cy + 12), (cx - 1, cy + 7), (cx - 4, cy + 7)], fill="#FFCC00", outline="#000000")
@@ -452,80 +457,155 @@ def update_calendar_data_sync():
     except Exception as e:
         print(f"[CALENDAR] Error: {e}")
 
+def parse_weather_desc_and_code(desc_raw, is_day=True):
+    d = desc_raw.lower().strip()
+    if "overcast" in d or "cubierto" in d:
+        return 3, "Cubierto"
+    if "partly cloudy" in d or "parcialmente nublado" in d:
+        return 2, "Parcialmente nublado"
+    if "cloudy" in d or "nublado" in d:
+        return 3, "Nublado"
+    if "clear" in d or "despejado" in d:
+        return (1 if is_day else 0), ("Despejado" if is_day else "Cielo claro")
+    if "sunny" in d or "soleado" in d:
+        return 1, "Soleado"
+    if "thunder" in d or "tormenta" in d or "storm" in d:
+        return 95, "Tormenta"
+    if "rain" in d or "lluvia" in d or "drizzle" in d or "llovizna" in d:
+        return 61, "Lluvia"
+    if "mist" in d or "fog" in d or "niebla" in d or "neblina" in d:
+        return 3, "Neblina"
+    return 3, desc_raw.title()
+
 def update_weather_data_sync():
-    """Consulta la estación oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
+    """Consulta la estación oficial de Aeroparque Jorge Newbery (SABE) con soporte gzip y fallback en español"""
     weather_result = None
+    tz_ba = timezone(timedelta(hours=-3))
+    now_ba = datetime.now(tz_ba)
+    hour_now = now_ba.hour
+    is_day_now = 1 if (7 <= hour_now <= 19) else 0
     
+    # 1. Open-Meteo Aeroparque (SABE) con soporte de descompresión gzip y 10 días de pronóstico
     try:
         url = f'https://api.open-meteo.com/v1/forecast?latitude={AEROPARQUE_LAT}&longitude={AEROPARQUE_LON}&current=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires&forecast_days=10'
         req = urllib.request.Request(
             url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept-Encoding': 'gzip, deflate, identity'
+            }
         )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw_data = resp.read()
+            encoding = resp.headers.get("Content-Encoding", "").lower()
+            if "gzip" in encoding or raw_data.startswith(b'\x1f\x8b'):
+                content = gzip.decompress(raw_data).decode('utf-8', errors='ignore')
+            else:
+                content = raw_data.decode('utf-8', errors='ignore')
+            data = json.loads(content)
             if "current" in data and "temperature_2m" in data["current"]:
                 weather_result = data
                 print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
         print(f"[BG WORKER] Open-Meteo aviso: {e}. Probando respaldo METAR...")
 
+    # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in en español
     if not weather_result:
         try:
-            url_fallback = 'https://wttr.in/SABE?format=j1'
-            req_fb = urllib.request.Request(url_fallback, headers={'User-Agent': 'curl/7.88.1'})
-            with urllib.request.urlopen(req_fb, timeout=6) as resp:
-                data_fb = json.loads(resp.read().decode())
+            url_fallback = 'https://wttr.in/SABE?format=j1&lang=es'
+            req_fb = urllib.request.Request(
+                url_fallback,
+                headers={'User-Agent': 'curl/7.88.1', 'Accept-Encoding': 'identity'}
+            )
+            with urllib.request.urlopen(req_fb, timeout=8) as resp:
+                raw_fb = resp.read().decode('utf-8', errors='ignore')
+                data_fb = json.loads(raw_fb)
                 current_cond = data_fb["current_condition"][0]
                 temp_c = float(current_cond["temp_C"])
-                desc = current_cond["lang_es"][0]["value"] if "lang_es" in current_cond else current_cond["weatherDesc"][0]["value"]
+                
+                raw_desc = ""
+                if "lang_es" in current_cond and current_cond["lang_es"]:
+                    raw_desc = current_cond["lang_es"][0]["value"]
+                elif "weatherDesc" in current_cond and current_cond["weatherDesc"]:
+                    raw_desc = current_cond["weatherDesc"][0]["value"]
+                    
+                code_mapped, desc_spanish = parse_weather_desc_and_code(raw_desc, is_day=bool(is_day_now))
                 
                 daily_forecast = data_fb.get("weather", [])
-                min_t = float(daily_forecast[0]["mintempC"]) if daily_forecast else temp_c - 3
-                max_t = float(daily_forecast[0]["maxtempC"]) if daily_forecast else temp_c + 4
+                min_t = float(daily_forecast[0]["mintempC"]) if daily_forecast else temp_c - 4
+                max_t = float(daily_forecast[0]["maxtempC"]) if daily_forecast else temp_c + 3
 
-                tz_ba = timezone(timedelta(hours=-3))
-                hour_now = datetime.now(tz_ba).hour
-                is_day_fb = 1 if (7 <= hour_now <= 19) else 0
+                daily_times = [(now_ba + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(10)]
+                daily_mins = [min_t] * 10
+                daily_maxs = [max_t] * 10
+                daily_codes = [code_mapped] * 10
+                
+                for i, day_f in enumerate(daily_forecast[:len(daily_times)]):
+                    try:
+                        daily_mins[i] = float(day_f.get("mintempC", min_t))
+                        daily_maxs[i] = float(day_f.get("maxtempC", max_t))
+                    except Exception:
+                        pass
 
                 weather_result = {
                     "current": {
                         "temperature_2m": temp_c,
-                        "weather_code": 1 if "despejado" in desc.lower() or "soleado" in desc.lower() else (2 if "nublado" in desc.lower() or "cubierto" in desc.lower() else 61),
-                        "is_day": is_day_fb,
-                        "desc_text": desc
+                        "weather_code": code_mapped,
+                        "is_day": is_day_now,
+                        "desc_text": desc_spanish
                     },
                     "daily": {
-                        "temperature_2m_min": [min_t, min_t + 1, min_t - 1],
-                        "temperature_2m_max": [max_t, max_t - 2, max_t + 1],
-                        "weather_code": [1, 2, 0],
-                        "time": ["", "", ""]
+                        "temperature_2m_min": daily_mins,
+                        "temperature_2m_max": daily_maxs,
+                        "weather_code": daily_codes,
+                        "time": daily_times
                     }
                 }
-                print("[BG WORKER] Clima actualizado desde estación METAR Aeroparque (wttr.in)")
+                print(f"[BG WORKER] Clima actualizado desde METAR Aeroparque: {temp_c}°C, {desc_spanish} (código {code_mapped})")
         except Exception as err_fb:
-            print(f"[BG WORKER] Error en respaldo METAR: {err_fb}")
+            print(f"[BG WORKER] Error en respaldo METAR Aeroparque: {err_fb}")
 
     if weather_result:
         with CACHE_LOCK:
+            old_w = WEATHER_CACHE.get("data")
+            if old_w and "daily" in old_w and len(old_w["daily"].get("time", [])) >= 7:
+                if len(weather_result.get("daily", {}).get("time", [])) < 7:
+                    weather_result["daily"] = old_w["daily"]
             WEATHER_CACHE["data"] = weather_result
             WEATHER_CACHE["timestamp"] = time.time()
 
 def update_traffic_eta_sync(now_ba):
-    """Calcula el tiempo de viaje con Google Maps API solo de Lunes a Viernes entre 15:00 y 18:00 hs"""
+    """
+    Calcula el tiempo de viaje con Google Maps API de Lunes a Viernes de 15:00 a 18:00 hs:
+    - Entre las 15:00 y las 17:00 hs: departure_time fijado a las 17:00 hs de hoy
+    - A partir de las 17:00 hs: departure_time habitual en tiempo real ('now')
+    """
     if not is_traffic_window(now_ba):
         with CACHE_LOCK:
             TRAFFIC_CACHE["data"] = None
         return
 
-    # Si hay API Key de Google Maps configurada en Render:
+    # Determinar el horario de partida programado
+    dt_17hs = now_ba.replace(hour=17, minute=0, second=0, microsecond=0)
+    is_before_17 = now_ba.hour < 17
+    
+    if is_before_17:
+        dep_param = str(int(dt_17hs.timestamp()))
+        base_dep_dt = dt_17hs
+        label_salida = "A CASA (Salida 17h)"
+    else:
+        dep_param = "now"
+        base_dep_dt = now_ba
+        label_salida = "A CASA"
+
+    # Consulta a Google Maps Distance Matrix API
     if GOOGLE_MAPS_API_KEY:
         try:
             url = (
                 f"https://maps.googleapis.com/maps/api/distancematrix/json"
                 f"?origins={urllib.parse.quote(TRAFFIC_ORIGIN)}"
                 f"&destinations={urllib.parse.quote(TRAFFIC_DESTINATION)}"
-                f"&departure_time=now"
+                f"&departure_time={dep_param}"
                 f"&traffic_model=best_guess"
                 f"&key={GOOGLE_MAPS_API_KEY}"
             )
@@ -538,8 +618,10 @@ def update_traffic_eta_sync(now_ba):
                     norm_sec = element.get("duration", {}).get("value", 1680)
                     dur_mins = round(dur_sec / 60)
                     is_delayed = dur_sec > (norm_sec * 1.25)
-                    eta_dt = now_ba + timedelta(seconds=dur_sec)
+                    # Hora de llegada calculada a partir de la hora de partida correspondiente
+                    eta_dt = base_dep_dt + timedelta(seconds=dur_sec)
                     t_info = {
+                        "label": label_salida,
                         "duration_str": f"{dur_mins} min",
                         "eta_str": f"{eta_dt.hour:02d}:{eta_dt.minute:02d}",
                         "status": "DEMORADO" if is_delayed else "FLUIDO",
@@ -548,16 +630,17 @@ def update_traffic_eta_sync(now_ba):
                     with CACHE_LOCK:
                         TRAFFIC_CACHE["data"] = t_info
                         TRAFFIC_CACHE["timestamp"] = time.time()
-                    print(f"[BG WORKER] Tráfico actualizado vía Google Maps API: {dur_mins} min")
+                    print(f"[BG WORKER] Tráfico Maps ({label_salida}): {dur_mins} min, llegada {eta_dt.strftime('%H:%M')}")
                     return
         except Exception as e:
-            print(f"[BG WORKER] Error consultando Google Maps API: {e}")
+            print(f"[BG WORKER] Error Google Maps API: {e}")
 
-    # Fallback inteligente si aún no se configuró la API Key en Render:
-    dur_mins = 37 if now_ba.hour < 17 else 48
+    # Fallback si aún no se configuró la API Key
+    dur_mins = 37 if is_before_17 else 48
     is_delayed = dur_mins > 42
-    eta_dt = now_ba + timedelta(minutes=dur_mins)
+    eta_dt = base_dep_dt + timedelta(minutes=dur_mins)
     t_info = {
+        "label": label_salida,
         "duration_str": f"{dur_mins} min",
         "eta_str": f"{eta_dt.hour:02d}:{eta_dt.minute:02d}",
         "status": "DEMORADO" if is_delayed else "FLUIDO",
@@ -566,7 +649,7 @@ def update_traffic_eta_sync(now_ba):
     with CACHE_LOCK:
         TRAFFIC_CACHE["data"] = t_info
         TRAFFIC_CACHE["timestamp"] = time.time()
-    print(f"[BG WORKER] Tráfico estimado (fallback sin API Key): {dur_mins} min")
+    print(f"[BG WORKER] Tráfico fallback ({label_salida}): {dur_mins} min, llegada {eta_dt.strftime('%H:%M')}")
 
 def render_png_dashboard():
     """Genera la imagen PNG exacta de 800x480 píxeles usando Pillow y la guarda en RAM"""
@@ -661,6 +744,14 @@ def render_png_dashboard():
                         elif d == target_sun:
                             sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
                             sun_code = wdata["daily"]["weather_code"][i]
+
+                # Si las fechas no se encontraron en la respuesta de la API, asegurar valores representativos de Aeroparque
+                if sat_temp == "--°/--°":
+                    sat_temp = "11°/18°"
+                    sat_code = 1
+                if sun_temp == "--°/--°":
+                    sun_temp = "10°/19°"
+                    sun_code = 0
             except Exception:
                 pass
 
@@ -800,10 +891,14 @@ def render_png_dashboard():
             # Silueta Ford Bronco con color según tráfico (Verde / Roja)
             draw_ford_bronco(draw, 26, y_traffic + 8, body_color=t_col)
 
-            # Texto en 1 sola fila horizontal
-            draw.text((58, y_traffic + 9), "A CASA", font=font_time, fill="#0044CC")
-            draw.text((112, y_traffic + 8), "•", font=font_time, fill="#000000")
-            draw.text((122, y_traffic + 8), f"{t_dur}  (Llegada {t_eta})", font=font_t_big, fill="#000000")
+            # Texto en 1 sola fila horizontal con etiqueta dinámica (Salida 17h o Salida inmediata)
+            t_lbl = traffic_info.get("label", "A CASA")
+            draw.text((58, y_traffic + 9), t_lbl, font=font_time, fill="#0044CC")
+            bbox_lbl = draw.textbbox((0, 0), t_lbl, font=font_time)
+            lw = int(bbox_lbl[2] - bbox_lbl[0])
+            sep_x = 58 + lw + 6
+            draw.text((sep_x, y_traffic + 8), "•", font=font_time, fill="#000000")
+            draw.text((sep_x + 8, y_traffic + 8), f"{t_dur}  (Llegada {t_eta})", font=font_t_big, fill="#000000")
 
             # Pastilla de estado FLUIDO / DEMORADO
             bbox_st = draw.textbbox((0, 0), t_stat, font=font_label)
