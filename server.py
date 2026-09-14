@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Servidor Definitivo para reTerminal E1002 (Spectra 6)
+Servidor Definitivo Verificado para reTerminal E1002 (Spectra 6)
 - Estación Meteorológica: Fijada exclusivamente en Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con fallback a wttr.in/SABE
-- Paleta estricta de los 6 colores primarios Spectra 6 de la e1002 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00)
-- Íconos con detección Día (Sol) / Noche (Luna) y alto contraste
-- Timeline de 8 a 17 hs: Altura 8px, Negro (ocupado), Blanco (libre), marcas cada 1h, etiquetas cada 3h y marcador actual en Rojo (#D60000)
-- Citas (Propuesta A): Horario y título al mismo nivel (13px negrita), captura de citas sin pérdida (Proyecto A OK web)
-- Finanzas: 6 activos con velas de 60 días, variación con % dinámico garantizado y nombres blindados
+- Paleta estricta de 6 colores esenciales Spectra 6 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00) - Cero grises
+- Detección Sol (Día) / Luna (Noche) para máxima coherencia visual
+- Cabecera: Más espacio para la descripción del clima (eliminado 'BUENOS AIRES' redundante a la derecha)
+- Timeline de 8 a 17 hs: Altura 8px (mitad), Negro (#000000) para ocupado, Blanco (#FFFFFF) para libre, marcas cada 1h, etiquetas cada 3h y marcador actual en Rojo (#D60000)
+- Citas (Propuesta A): Horario y título al mismo nivel (13px negrita), duración garantizada (60m si fin <= inicio) y margen de cortesía de 45 minutos (citas en curso nunca desaparecen)
+- Finanzas: 6 activos con velas de 60 días, variación con % dinámico garantizado y nombres blindados contra nulos
 - Entrega en /dashboard.png y / con imagen Base64 incrustada (<5 ms)
 """
 
@@ -41,8 +42,15 @@ SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?forma
 AEROPARQUE_LAT = "-34.5586"
 AEROPARQUE_LON = "-58.4164"
 
-# Exclusiones de canceladas históricas
-EXCLUDED_TITLES = ["proyecto 90k", "graciela maestra pedro", "cancelado", "canceled", "rechazado"]
+# Exclusiones de reuniones canceladas históricas (filtrado por título para no afectar citas válidas)
+EXCLUDED_TITLES = [
+    "proyecto 90k",
+    "graciela maestra pedro",
+    "recap global producto",
+    "cancelado",
+    "canceled",
+    "rechazado"
+]
 
 # Memoria RAM compartida
 CACHE_LOCK = threading.Lock()
@@ -72,9 +80,9 @@ def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
     """
     Dibuja íconos meteorológicos utilizando EXCLUSIVAMENTE los 6 colores primarios de Spectra 6:
     Blanco (#FFFFFF), Negro (#000000), Rojo (#D60000), Verde (#008833), Azul (#0044CC), Amarillo (#FFCC00).
+    Todos los anchos son números enteros estrictos.
     """
     if not is_day and code in (0, 1): # Noche despejada -> LUNA
-        # Medialuna amarilla con contorno negro
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
         draw.ellipse([cx - r + 6, cy - r - 1, cx + r + 2, cy + r - 3], fill="#FFFFFF")
@@ -95,9 +103,8 @@ def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
     elif code >= 95: # Tormenta con rayo
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
-        # Rayo amarillo con borde negro
         draw.polygon([(cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6), (cx + 4, cy + 6), (cx - 3, cy + 12), (cx - 1, cy + 7), (cx - 4, cy + 7)], fill="#FFCC00", outline="#000000")
-    else: # Lluvia (gotas en azul primario puro)
+    else: # Lluvia (gotas en azul primario puro con ancho entero 1)
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
         draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
@@ -267,9 +274,10 @@ def extract_people_from_vevent(raw):
 
 def update_calendar_data_sync():
     """
-    Lógica probada de 'Proyecto A OK web':
-    - Filtra citas canceladas o marcadas como FREE (descarta reuniones canceladas/rechazadas como Recap Global producto)
-    - Procesa series recurrentes directamente sin colisiones de UID ni problemas de UNTIL
+    Gestión de calendario verificada:
+    - Captura cualquier cita dentro de las próximas 8h con margen de permanencia de 45m (las citas en curso no desaparecen).
+    - Asigna una duración mínima de 60m para eventos con fin <= inicio (evita que expiren en el segundo 0).
+    - Cero filtrado por disponibilidad 'FREE' (para no descartar citas personales / de fin de semana).
     """
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
@@ -300,19 +308,13 @@ def update_calendar_data_sync():
 
         unfolded = re.sub(r'\r?\n[ \t]', '', content)
         raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', unfolded, re.DOTALL | re.IGNORECASE)
-
         weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
         today_code = weekday_map[now_ba.weekday()]
 
         for raw in raw_events:
             status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
             status = status_m.group(1).upper() if status_m else ""
-
-            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS:\s*([A-Z]+)', raw, re.IGNORECASE)
-            busy_status = busy_m.group(1).upper() if busy_m else ""
-
-            # FILTRO ESTRICTO: descarta canceladas y reuniones con disponibilidad FREE (ej. Recap Global producto)
-            if status == "CANCELLED" or busy_status == "FREE":
+            if status == "CANCELLED":
                 continue
 
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
@@ -330,7 +332,7 @@ def update_calendar_data_sync():
                 loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
                 loc_str = loc_raw.replace("Reunión de Microsoft Teams", "Microsoft Teams").strip("; ")
 
-            dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:\s*([0-9TZ]+)', raw, re.IGNORECASE)
+            dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             rrule_m = re.search(r'RRULE:(.*?)\r?\n', raw, re.IGNORECASE)
 
@@ -339,21 +341,20 @@ def update_calendar_data_sync():
                 if dtend_m:
                     dt_end = parse_ical_dt(dtend_m.group(1), tz_ba)
                 else:
-                    dt_end = dt_start + timedelta(minutes=30)
-                
-                # Garantizar duración positiva
+                    dt_end = dt_start + timedelta(minutes=60)
+
+                # Garantizar duración mínima de 60m para eventos puntuales/hitos
                 if dt_end <= dt_start:
-                    dt_end = dt_start + timedelta(minutes=30)
+                    dt_end = dt_start + timedelta(minutes=60)
                 duration = dt_end - dt_start
 
                 target_start = None
                 target_end = None
 
-                # 1. Evento puntual que cae en la ventana
-                if dt_end >= now_ba and dt_start <= window_end_ba:
+                # Lógica flexible de ventana con margen de cortesía de 45m
+                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
-                # 2. Evento periódico recurrente (RRULE)
                 elif rrule_m:
                     rrule_str = rrule_m.group(1).upper()
                     matches_recurrence = False
@@ -361,8 +362,8 @@ def update_calendar_data_sync():
                         matches_recurrence = True
                     elif "FREQ=WEEKLY" in rrule_str:
                         if "BYDAY=" in rrule_str:
-                            bydays_m = re.search(r'BYDAY=([A-Z0-9,]+)', rrule_str)
-                            if bydays_m and today_code in bydays_m.group(1):
+                            bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
+                            if bydays_m and today_code in bydays_m.group(1).split(','):
                                 matches_recurrence = True
                         else:
                             if dt_start.weekday() == now_ba.weekday():
@@ -371,7 +372,7 @@ def update_calendar_data_sync():
                     if matches_recurrence:
                         cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
                         cand_end = cand_start + duration
-                        if cand_end >= now_ba and cand_start <= window_end_ba:
+                        if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
                             target_start = cand_start
                             target_end = cand_end
 
@@ -385,12 +386,10 @@ def update_calendar_data_sync():
                         "end": target_end.strftime("%H:%M"),
                         "duration": dur_str,
                         "attendees": people,
-                        "location": loc_str,
-                        "start_dt": target_start,
-                        "end_dt": target_end
+                        "location": loc_str
                     })
 
-                # Para el timeline de 8 a 17h del día de hoy:
+                # Para el timeline de 8 a 17h de hoy:
                 t_s = target_start or (dt_start if dt_start.date() == now_ba.date() else None)
                 t_e = target_end or (dt_end if dt_start.date() == now_ba.date() else None)
                 if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
@@ -404,15 +403,15 @@ def update_calendar_data_sync():
             CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado con éxito: {len(events_window)} citas en ventana de 8h, {len(timeline_events)} en timeline")
+        print(f"[CALENDAR] Actualizado: {len(events_window)} citas en ventana de 8h, {len(timeline_events)} en timeline 8-17h")
     except Exception as e:
-        print(f"[CALENDAR] Error en descarga: {e}")
+        print(f"[CALENDAR] Error: {e}")
 
 def update_weather_data_sync():
     """Consulta la estación meteorológica oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
     weather_result = None
     
-    # 1. Intento principal: Open-Meteo centrado en la pista de Aeroparque (SABE)
+    # 1. Intento principal: Open-Meteo centrado en Aeroparque (SABE) con 10 días de pronóstico
     try:
         url = f'https://api.open-meteo.com/v1/forecast?latitude={AEROPARQUE_LAT}&longitude={AEROPARQUE_LON}&current=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires&forecast_days=10'
         req = urllib.request.Request(
@@ -425,12 +424,12 @@ def update_weather_data_sync():
                 weather_result = data
                 print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
-        print(f"[BG WORKER] Aviso: Open-Meteo Aeroparque falló ({e}). Probando estación METAR de respaldo...")
+        print(f"[BG WORKER] Aviso: Open-Meteo Aeroparque ({e}). Consultando estación METAR de respaldo...")
 
     # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in
     if not weather_result:
         try:
-            url_fallback = 'https://wttr.in/SABE?format=j1&lang=es'
+            url_fallback = 'https://wttr.in/SABE?format=j1'
             req_fb = urllib.request.Request(
                 url_fallback,
                 headers={'User-Agent': 'curl/7.88.1'}
@@ -441,7 +440,6 @@ def update_weather_data_sync():
                 temp_c = float(current_cond["temp_C"])
                 desc = current_cond["lang_es"][0]["value"] if "lang_es" in current_cond else current_cond["weatherDesc"][0]["value"]
                 
-                # Mapear a estructura estándar
                 daily_forecast = data_fb.get("weather", [])
                 min_t = float(daily_forecast[0]["mintempC"]) if daily_forecast else temp_c - 3
                 max_t = float(daily_forecast[0]["maxtempC"]) if daily_forecast else temp_c + 4
@@ -480,7 +478,7 @@ def render_png_dashboard():
         img = Image.new('RGB', (width, height), color='#FFFFFF')
         draw = ImageDraw.Draw(img)
 
-        # Tipografías optimizadas
+        # Tipografías optimizadas (Piso mínimo de 10px en negrita)
         font_clock = get_font(26)
         font_day = get_font(13)
         font_meta = get_font(10)
@@ -513,7 +511,6 @@ def render_png_dashboard():
             timeline_events = CALENDAR_CACHE.get("today_all_events") or []
             stocks = FINANCE_CACHE.get("data") or []
 
-        # Valores dinámicos de Aeroparque
         temp_cur = "--°"
         desc_cur = "Estación Aeroparque"
         range_cur = "Mín: --° | Máx: --°"
@@ -533,9 +530,8 @@ def render_png_dashboard():
                 if "is_day" in wdata["current"]:
                     is_day = bool(wdata["current"]["is_day"])
 
-                raw_desc = wdata["current"].get("desc_text")
-                if raw_desc:
-                    desc_cur = translate_weather_to_spanish(raw_desc, is_day)[:24]
+                if "desc_text" in wdata["current"]:
+                    desc_cur = str(wdata["current"]["desc_text"])[:24]
                 else:
                     if code == 0: desc_cur = "Despejado" if is_day else "Cielo claro"
                     elif code in (1, 2): desc_cur = "Mayormente despejado" if is_day else "Parcialmente nublado"
@@ -548,7 +544,7 @@ def render_png_dashboard():
                 max_c = round(wdata["daily"]["temperature_2m_max"][0])
                 range_cur = f"Mín: {min_c}° | Máx: {max_c}°"
 
-                # Determinar fechas exactas del fin de semana sincronizado
+                # Sincronización robusta de fin de semana
                 if now_ba.weekday() == 6: # Domingo: mirar al próximo fin de semana completo
                     target_sat = (now_ba + timedelta(days=6)).date()
                 else: # Lunes a Sábado: fin de semana en curso / próximo
@@ -590,7 +586,7 @@ def render_png_dashboard():
 
         draw.line([525, 16, 525, 66], fill="#000000", width=2)
 
-        # Clima actual de Aeroparque (Sol de día / Luna de noche)
+        # Clima actual Aeroparque (Día: Sol / Noche: Luna)
         draw_weather_icon(draw, cur_code, 550, 41, r=10, is_day=is_day)
         draw.text((572, 24), temp_cur, font=font_clock, fill="#000000")
         draw.text((634, 27), desc_cur, font=font_desc_clima, fill="#000000")
@@ -750,7 +746,6 @@ def render_png_dashboard():
                 prc_str = str(st.get("price") or "0.00")
                 draw.text((x_c + 7, y_c + 26), f"${prc_str}", font=font_price, fill="#000000")
                 
-                # Gráfico de velas con fondo blanco puro y borde negro
                 chart_x = x_c + 7
                 chart_y = y_c + 48
                 chart_w = 144
