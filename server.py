@@ -44,8 +44,9 @@ SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?forma
 
 # Google Maps API Key y Trayecto Trabajo -> Casa
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
-TRAFFIC_ORIGIN = "BITALI, Planta Industrial Talar, Ruta Panamericana Km 31.5, El Talar"
-TRAFFIC_DESTINATION = "Iberá 3544, CABA"
+# Coordenadas exactas de Bitali y dirección de Iberá (extraídas de Google Maps)
+TRAFFIC_ORIGIN = "-34.4725309,-58.6749598"
+TRAFFIC_DESTINATION = "Iberá 3544, C1430AVF, CABA"
 
 # Coordenadas exactas Estación Meteorológica Aeroparque Jorge Newbery (SABE)
 AEROPARQUE_LAT = "-34.5586"
@@ -70,7 +71,7 @@ INITIAL_READY = threading.Event()
 CALENDAR_CACHE = {"events": [], "today_all_events": [], "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
 WEATHER_CACHE = {"data": None, "timestamp": 0}
-TRAFFIC_CACHE = {"data": None, "timestamp": 0}
+TRAFFIC_CACHE = {"data": None, "debug": {}, "timestamp": 0}
 IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
 
 def get_font(size):
@@ -625,13 +626,30 @@ def update_weather_data_sync():
 
 def update_traffic_eta_sync(now_ba):
     """
-    Calcula el tiempo de viaje con Google Maps API de Lunes a Viernes de 15:00 a 18:00 hs:
-    - Entre las 15:00 y las 17:00 hs: departure_time fijado a las 17:00 hs de hoy
-    - A partir de las 17:00 hs: departure_time habitual en tiempo real ('now')
+    Consulta en tiempo real la Google Maps Distance Matrix API:
+    - Lunes a Viernes de 15:00 a 18:00 hs
+    - Entre 15:00 y 17:00 hs: salida proyectada a las 17:00 hs
+    - A partir de las 17:00 hs: salida en tiempo real ('now')
+    - CERO DATOS INVENTADOS: Si no hay API Key o falla, no se simula ninguna duración
     """
+    tz_ba = timezone(timedelta(hours=-3))
+    debug_tr = {
+        "api_key_configured": bool(GOOGLE_MAPS_API_KEY),
+        "api_key_preview": (GOOGLE_MAPS_API_KEY[:8] + "...") if GOOGLE_MAPS_API_KEY else "NO_CONFIGURADA",
+        "origin": TRAFFIC_ORIGIN,
+        "destination": TRAFFIC_DESTINATION,
+        "is_window_active": is_traffic_window(now_ba),
+        "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
+        "departure_param": None,
+        "google_status": None,
+        "duration_in_traffic": None,
+        "error": None
+    }
+
     if not is_traffic_window(now_ba):
         with CACHE_LOCK:
             TRAFFIC_CACHE["data"] = None
+            TRAFFIC_CACHE["debug"] = debug_tr
         return
 
     # Determinar el horario de partida programado
@@ -647,28 +665,46 @@ def update_traffic_eta_sync(now_ba):
         base_dep_dt = now_ba
         label_salida = "A CASA"
 
-    # Consulta a Google Maps Distance Matrix API
-    if GOOGLE_MAPS_API_KEY:
-        try:
-            url = (
-                f"https://maps.googleapis.com/maps/api/distancematrix/json"
-                f"?origins={urllib.parse.quote(TRAFFIC_ORIGIN)}"
-                f"&destinations={urllib.parse.quote(TRAFFIC_DESTINATION)}"
-                f"&departure_time={dep_param}"
-                f"&traffic_model=best_guess"
-                f"&key={GOOGLE_MAPS_API_KEY}"
-            )
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                res = json.loads(resp.read().decode())
+    debug_tr["departure_param"] = dep_param
+
+    if not GOOGLE_MAPS_API_KEY:
+        debug_tr["error"] = "Variable de entorno GOOGLE_MAPS_API_KEY no configurada en Render"
+        print("[BG WORKER] Tráfico: falta GOOGLE_MAPS_API_KEY en Render. Sin datos simulados.")
+        with CACHE_LOCK:
+            TRAFFIC_CACHE["data"] = None
+            TRAFFIC_CACHE["debug"] = debug_tr
+        return
+
+    try:
+        url = (
+            f"https://maps.googleapis.com/maps/api/distancematrix/json"
+            f"?origins={urllib.parse.quote(TRAFFIC_ORIGIN)}"
+            f"&destinations={urllib.parse.quote(TRAFFIC_DESTINATION)}"
+            f"&departure_time={dep_param}"
+            f"&traffic_model=best_guess"
+            f"&key={GOOGLE_MAPS_API_KEY}"
+        )
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw_json = resp.read().decode('utf-8', errors='ignore')
+            res = json.loads(raw_json)
+            debug_tr["google_response"] = res
+            
+            status_api = res.get("status")
+            debug_tr["google_status"] = status_api
+
+            if status_api == "OK":
                 element = res["rows"][0]["elements"][0]
-                if element.get("status") == "OK":
-                    dur_sec = element.get("duration_in_traffic", element.get("duration", {})).get("value", 2220)
+                elem_status = element.get("status")
+                debug_tr["element_status"] = elem_status
+
+                if elem_status == "OK":
+                    dur_sec = element.get("duration_in_traffic", element.get("duration", {})).get("value", 0)
                     norm_sec = element.get("duration", {}).get("value", 1680)
                     dur_mins = round(dur_sec / 60)
                     is_delayed = dur_sec > (norm_sec * 1.25)
-                    # Hora de llegada calculada a partir de la hora de partida correspondiente
                     eta_dt = base_dep_dt + timedelta(seconds=dur_sec)
+                    
                     t_info = {
                         "label": label_salida,
                         "duration_str": f"{dur_mins} min",
@@ -676,29 +712,26 @@ def update_traffic_eta_sync(now_ba):
                         "status": "DEMORADO" if is_delayed else "FLUIDO",
                         "color": "#D60000" if is_delayed else "#008833"
                     }
+                    debug_tr["duration_in_traffic"] = f"{dur_mins} min"
+                    debug_tr["eta_calculated"] = f"{eta_dt.hour:02d}:{eta_dt.minute:02d}"
+
                     with CACHE_LOCK:
                         TRAFFIC_CACHE["data"] = t_info
+                        TRAFFIC_CACHE["debug"] = debug_tr
                         TRAFFIC_CACHE["timestamp"] = time.time()
-                    print(f"[BG WORKER] Tráfico Maps ({label_salida}): {dur_mins} min, llegada {eta_dt.strftime('%H:%M')}")
+                    print(f"[BG WORKER] Tráfico Maps REAL ({label_salida}): {dur_mins} min (llegada {eta_dt.strftime('%H:%M')})")
                     return
-        except Exception as e:
-            print(f"[BG WORKER] Error Google Maps API: {e}")
+                else:
+                    debug_tr["error"] = f"Element status not OK: {elem_status}"
+            else:
+                debug_tr["error"] = f"Google API status error: {status_api} - {res.get('error_message', '')}"
+    except Exception as e:
+        debug_tr["error"] = f"Exception en llamada Google Maps: {e}"
+        print(f"[BG WORKER] Error Google Maps API: {e}")
 
-    # Fallback si aún no se configuró la API Key
-    dur_mins = 37 if is_before_17 else 48
-    is_delayed = dur_mins > 42
-    eta_dt = base_dep_dt + timedelta(minutes=dur_mins)
-    t_info = {
-        "label": label_salida,
-        "duration_str": f"{dur_mins} min",
-        "eta_str": f"{eta_dt.hour:02d}:{eta_dt.minute:02d}",
-        "status": "DEMORADO" if is_delayed else "FLUIDO",
-        "color": "#D60000" if is_delayed else "#008833"
-    }
     with CACHE_LOCK:
-        TRAFFIC_CACHE["data"] = t_info
-        TRAFFIC_CACHE["timestamp"] = time.time()
-    print(f"[BG WORKER] Tráfico fallback ({label_salida}): {dur_mins} min, llegada {eta_dt.strftime('%H:%M')}")
+        TRAFFIC_CACHE["data"] = None
+        TRAFFIC_CACHE["debug"] = debug_tr
 
 def render_png_dashboard():
     """Genera la imagen PNG exacta de 800x480 píxeles usando Pillow y la guarda en RAM"""
@@ -1195,6 +1228,25 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 with CACHE_LOCK:
                     events = CALENDAR_CACHE.get("events", [])
                 body = json.dumps(events).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            elif self.path.startswith("/api/debug_traffic"):
+                tz_ba = timezone(timedelta(hours=-3))
+                now_ba = datetime.now(tz_ba)
+                force = "refresh=true" in self.path
+                if force:
+                    update_traffic_eta_sync(now_ba)
+                with CACHE_LOCK:
+                    tr_copy = dict(TRAFFIC_CACHE.get("debug", {}))
+                    tr_copy["current_traffic_data"] = TRAFFIC_CACHE.get("data")
+                body = json.dumps(tr_copy, indent=2).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
