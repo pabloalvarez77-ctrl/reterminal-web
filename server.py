@@ -360,6 +360,9 @@ def update_calendar_data_sync():
         weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
         today_code = weekday_map[now_ba.weekday()]
 
+        events_by_uid = {}
+        timeline_events = []
+
         for raw in raw_events:
             status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
             status = status_m.group(1).upper() if status_m else ""
@@ -370,9 +373,15 @@ def update_calendar_data_sync():
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
             summary = summary.replace('\\,', ',').replace('\\;', ';')
 
-            # Excluir canceladas y tiempo de concentración (así queda libre en timeline y fuera de tarjetas)
+            # Excluir canceladas y tiempo de concentración
             if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
                 continue
+
+            # Extraer UID único y si es una excepción de serie (RECURRENCE-ID)
+            uid_m = re.search(r'UID:(.*?)\r?\n', raw, re.IGNORECASE)
+            uid = uid_m.group(1).strip() if uid_m else ""
+            rec_id_m = re.search(r'RECURRENCE-ID(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
+            is_exception = rec_id_m is not None
 
             people = extract_people_from_vevent(raw)
 
@@ -430,14 +439,31 @@ def update_calendar_data_sync():
                     dur_min = int((target_end - target_start).total_seconds() / 60)
                     dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
                     
-                    events_window.append({
+                    start_k = target_start.strftime("%H:%M")
+                    # Clave única para evitar duplicados entre serie maestra y excepciones
+                    event_key = f"{uid}_{start_k}" if uid else f"{summary}_{start_k}"
+
+                    ev_candidate = {
                         "title": summary,
-                        "start": target_start.strftime("%H:%M"),
+                        "start": start_k,
                         "end": target_end.strftime("%H:%M"),
                         "duration": dur_str,
                         "attendees": people,
-                        "location": loc_str
-                    })
+                        "location": loc_str,
+                        "is_exception": is_exception,
+                        "uid": uid
+                    }
+
+                    # Si ya existe una ocurrencia para este UID en este horario:
+                    if event_key in events_by_uid:
+                        # La excepción modificada (RECURRENCE-ID) reemplaza a la serie maestra
+                        if is_exception:
+                            events_by_uid[event_key] = ev_candidate
+                        # O si tiene ubicación real (Maps) en lugar de Teams genérico
+                        elif "maps" in loc_str.lower() or "http" in loc_str.lower():
+                            events_by_uid[event_key] = ev_candidate
+                    else:
+                        events_by_uid[event_key] = ev_candidate
 
                 # Para el timeline de 8 a 17h
                 t_s = target_start or (dt_start if dt_start.date() == now_ba.date() else None)
@@ -448,12 +474,35 @@ def update_calendar_data_sync():
                         "end_dt": t_e
                     })
 
-        events_window.sort(key=lambda x: x["start"])
+        # Extraer lista final de citas consolidadas
+        events_window = list(events_by_uid.values())
+
+        # Deduplicación secundaria por proximidad de título y horario
+        deduped_window = []
+        for ev in events_window:
+            is_dup = False
+            for i, existing in enumerate(deduped_window):
+                if ev["start"] == existing["start"]:
+                    t1 = "".join(c for c in ev["title"].lower() if c.isalnum())
+                    t2 = "".join(c for c in existing["title"].lower() if c.isalnum())
+                    if t1 in t2 or t2 in t1:
+                        is_dup = True
+                        loc_ev = ev.get("location", "")
+                        loc_ex = existing.get("location", "")
+                        if ("teams" in loc_ex.lower()) and ("maps" in loc_ev.lower() or "http" in loc_ev.lower() or len(loc_ev) > len(loc_ex)):
+                            deduped_window[i] = ev
+                        elif len(ev["title"]) > len(existing["title"]) and "teams" not in loc_ev.lower():
+                            deduped_window[i] = ev
+                        break
+            if not is_dup:
+                deduped_window.append(ev)
+
+        deduped_window.sort(key=lambda x: x["start"])
         with CACHE_LOCK:
-            CALENDAR_CACHE["events"] = events_window
+            CALENDAR_CACHE["events"] = deduped_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado: {len(events_window)} citas ventana, {len(timeline_events)} timeline")
+        print(f"[CALENDAR] Actualizado: {len(deduped_window)} citas ventana (deduplicadas de {len(events_window)}), {len(timeline_events)} timeline")
     except Exception as e:
         print(f"[CALENDAR] Error: {e}")
 
@@ -875,10 +924,31 @@ def render_png_dashboard():
                 draw.rounded_rectangle([432 - pw, y_card + 5, 432, y_card + 20], radius=2, fill="#000000")
                 draw.text((432 - pw + 4, y_card + 6), dur, font=font_label, fill="#FFFFFF")
                 
-                # Fila 2: Detalles en negro sólido
-                sub = str(evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in t_str.lower() else "📍 Microsoft Teams"))
+                # Fila 2: Detalles en negro sólido (limpieza de URLs y caracteres incompatibles)
+                loc_raw = str(evt.get("location") or "").strip()
                 if evt.get("attendees"):
                     sub = f"👤 {', '.join(str(a) for a in evt['attendees'])}"
+                elif loc_raw:
+                    # Limpiar prefijos no imprimibles
+                    loc_clean = re.sub(r'^[^\w\s📍🍽️👤]+', '', loc_raw).strip()
+                    if loc_clean.startswith("http://") or loc_clean.startswith("https://"):
+                        if "maps" in loc_clean.lower():
+                            sub = "📍 Ubicación (Google Maps)"
+                        elif "teams" in loc_clean.lower():
+                            sub = "📍 Microsoft Teams"
+                        else:
+                            sub = "📍 Enlace externo"
+                    elif "teams" in loc_clean.lower():
+                        sub = "📍 Microsoft Teams"
+                    elif not any(loc_clean.startswith(p) for p in ("📍", "🍽️", "👤")):
+                        sub = f"📍 {loc_clean}"
+                    else:
+                        sub = loc_clean
+                elif "almuerzo" in t_str.lower():
+                    sub = "🍽️ Almuerzo"
+                else:
+                    sub = "📍 Microsoft Teams"
+
                 draw.text((28, y_card + 28), sub[:48], font=font_label, fill="#000000")
                 
                 y_card += card_h + gap
