@@ -765,10 +765,17 @@ def render_png_dashboard():
         draw.line([325, 16, 325, 66], fill="#000000", width=2)
 
         draw.text((335, 20), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
-        draw_weather_icon(draw, sat_code, 345, 48, r=6, is_day=True)
-        draw.text((358, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
-        draw_weather_icon(draw, sun_code, 440, 48, r=6, is_day=True)
-        draw.text((453, 42), f"DOM: {sun_temp}", font=font_label, fill="#000000")
+        if sat_code is not None and sat_temp != "--°/--°":
+            draw_weather_icon(draw, sat_code, 345, 48, r=6, is_day=True)
+            draw.text((358, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
+        else:
+            draw.text((345, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
+
+        if sun_code is not None and sun_temp != "--°/--°":
+            draw_weather_icon(draw, sun_code, 440, 48, r=6, is_day=True)
+            draw.text((453, 42), f"DOM: {sun_temp}", font=font_label, fill="#000000")
+        else:
+            draw.text((440, 42), f"DOM: {sun_temp}", font=font_label, fill="#000000")
 
         draw.line([525, 16, 525, 66], fill="#000000", width=2)
 
