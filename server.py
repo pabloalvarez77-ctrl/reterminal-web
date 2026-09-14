@@ -272,18 +272,63 @@ def extract_people_from_vevent(raw):
 
     return people
 
+def evaluate_rrule(rrule_str, dt_start, now_ba, tz_ba):
+    weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
+    today_code = weekday_map[now_ba.weekday()]
+
+    # 1. Comprobar fecha de vencimiento (UNTIL)
+    until_m = re.search(r'UNTIL=([0-9TZ]+)', rrule_str)
+    if until_m:
+        dt_until = parse_ical_dt(until_m.group(1), tz_ba)
+        if now_ba > dt_until:
+            return False
+
+    # 2. Comprobar intervalo de repetición (INTERVAL)
+    interval_m = re.search(r'INTERVAL=([0-9]+)', rrule_str)
+    interval = int(interval_m.group(1)) if interval_m else 1
+
+    if "FREQ=DAILY" in rrule_str:
+        days_diff = (now_ba.date() - dt_start.date()).days
+        if days_diff < 0 or (days_diff % interval) != 0:
+            return False
+        return True
+
+    elif "FREQ=WEEKLY" in rrule_str:
+        # Validar día de la semana
+        bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
+        if bydays_m:
+            if today_code not in bydays_m.group(1).split(','):
+                return False
+        else:
+            if dt_start.weekday() != now_ba.weekday():
+                return False
+
+        # Validar intervalo semanal (ej. cada 2 semanas = quincenal)
+        dt_start_monday = (dt_start - timedelta(days=dt_start.weekday())).date()
+        now_ba_monday = (now_ba - timedelta(days=now_ba.weekday())).date()
+        days_diff = (now_ba_monday - dt_start_monday).days
+        if days_diff < 0:
+            return False
+        weeks_diff = round(days_diff / 7)
+        if (weeks_diff % interval) != 0:
+            return False
+        return True
+
+    elif "FREQ=MONTHLY" in rrule_str:
+        if dt_start.day != now_ba.day:
+            return False
+        return True
+
+    return False
+
 def update_calendar_data_sync():
-    """
-    Gestión de calendario verificada:
-    - Captura cualquier cita dentro de las próximas 8h con margen de permanencia de 45m (las citas en curso no desaparecen).
-    - Asigna una duración mínima de 60m para eventos con fin <= inicio (evita que expiren en el segundo 0).
-    - Cero filtrado por disponibilidad 'FREE' (para no descartar citas personales / de fin de semana).
-    """
+    """Lógica de calendario con soporte estricto de intervalos de repetición (quincenal, semanal, etc.) y EXDATE"""
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
     day_start_ba = now_ba.replace(hour=8, minute=0, second=0, microsecond=0)
     day_end_ba = now_ba.replace(hour=17, minute=0, second=0, microsecond=0)
+    today_compact = now_ba.strftime("%Y%m%d")
     
     events_window = []
     timeline_events = []
@@ -308,8 +353,6 @@ def update_calendar_data_sync():
 
         unfolded = re.sub(r'\r?\n[ \t]', '', content)
         raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', unfolded, re.DOTALL | re.IGNORECASE)
-        weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
-        today_code = weekday_map[now_ba.weekday()]
 
         for raw in raw_events:
             status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
@@ -329,7 +372,7 @@ def update_calendar_data_sync():
             loc_m = re.search(r'LOCATION(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             loc_str = ""
             if loc_m:
-                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
+                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\;', ';')
                 loc_str = loc_raw.replace("Reunión de Microsoft Teams", "Microsoft Teams").strip("; ")
 
             dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
@@ -343,7 +386,6 @@ def update_calendar_data_sync():
                 else:
                     dt_end = dt_start + timedelta(minutes=60)
 
-                # Garantizar duración mínima de 60m para eventos puntuales/hitos
                 if dt_end <= dt_start:
                     dt_end = dt_start + timedelta(minutes=60)
                 duration = dt_end - dt_start
@@ -351,30 +393,26 @@ def update_calendar_data_sync():
                 target_start = None
                 target_end = None
 
-                # Lógica flexible de ventana con margen de cortesía de 45m
-                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
-                    target_start = dt_start
-                    target_end = dt_end
-                elif rrule_m:
-                    rrule_str = rrule_m.group(1).upper()
-                    matches_recurrence = False
-                    if "FREQ=DAILY" in rrule_str:
-                        matches_recurrence = True
-                    elif "FREQ=WEEKLY" in rrule_str:
-                        if "BYDAY=" in rrule_str:
-                            bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
-                            if bydays_m and today_code in bydays_m.group(1).split(','):
-                                matches_recurrence = True
-                        else:
-                            if dt_start.weekday() == now_ba.weekday():
-                                matches_recurrence = True
+                # 1. Caso reunión única (no recurrente)
+                if not rrule_m:
+                    if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
+                        target_start = dt_start
+                        target_end = dt_end
 
-                    if matches_recurrence:
-                        cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
-                        cand_end = cand_start + duration
-                        if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
-                            target_start = cand_start
-                            target_end = cand_end
+                # 2. Caso reunión recurrente (evaluando INTERVAL, UNTIL y EXDATE)
+                else:
+                    rrule_str = rrule_m.group(1).upper()
+                    if evaluate_rrule(rrule_str, dt_start, now_ba, tz_ba):
+                        # Verificar si esta fecha puntual fue cancelada / excluida
+                        exdates = re.findall(r'EXDATE(?:;[^:\r\n]*)?:([0-9TZ,]+)', raw, re.IGNORECASE)
+                        is_excluded = any(today_compact in ex for ex in exdates)
+                        
+                        if not is_excluded:
+                            cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
+                            cand_end = cand_start + duration
+                            if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
+                                target_start = cand_start
+                                target_end = cand_end
 
                 if target_start and target_end:
                     dur_min = int((target_end - target_start).total_seconds() / 60)
@@ -389,7 +427,7 @@ def update_calendar_data_sync():
                         "location": loc_str
                     })
 
-                # Para el timeline de 8 a 17h de hoy:
+                # Para el timeline de 8 a 17h del día de hoy:
                 t_s = target_start or (dt_start if dt_start.date() == now_ba.date() else None)
                 t_e = target_end or (dt_end if dt_start.date() == now_ba.date() else None)
                 if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
@@ -403,10 +441,9 @@ def update_calendar_data_sync():
             CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado: {len(events_window)} citas en ventana de 8h, {len(timeline_events)} en timeline 8-17h")
+        print(f"[CALENDAR] Actualizado con soporte de intervalos: {len(events_window)} citas ventana, {len(timeline_events)} timeline")
     except Exception as e:
         print(f"[CALENDAR] Error: {e}")
-
 def update_weather_data_sync():
     """Consulta la estación meteorológica oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
     weather_result = None
