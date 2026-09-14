@@ -57,6 +57,7 @@ EXCLUDED_TITLES = [
 
 # Memoria RAM compartida
 CACHE_LOCK = threading.Lock()
+INITIAL_READY = threading.Event()
 CALENDAR_CACHE = {"events": [], "today_all_events": [], "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
 WEATHER_CACHE = {"data": None, "timestamp": 0}
@@ -863,15 +864,19 @@ def render_png_dashboard():
         return fb_bytes, base64.b64encode(fb_bytes).decode('ascii')
 
 def background_worker_loop():
-    print("[BG WORKER] Iniciando carga de datos...")
+    print("[BG WORKER] Iniciando carga completa de datos (Finanzas + Clima + Calendario)...")
     try:
         update_finance_data_sync()
         update_weather_data_sync()
         update_calendar_data_sync()
+        # Solo después de que TODAS las fuentes finalizaron se genera la imagen
         render_png_dashboard()
-        print("[BG WORKER] Primera imagen generada con éxito con todos los datos.")
+        INITIAL_READY.set()
+        print("[BG WORKER] Primera imagen generada con éxito con el 100% de los datos.")
     except Exception as e:
-        print(f"[BG WORKER] Error inicial: {e}")
+        print(f"[BG WORKER] Error en carga inicial: {e}")
+        render_png_dashboard()
+        INITIAL_READY.set()
 
     while True:
         time.sleep(300)
@@ -879,10 +884,11 @@ def background_worker_loop():
             update_finance_data_sync()
             update_weather_data_sync()
             update_calendar_data_sync()
+            # Actualización atómica del PNG únicamente al terminar las 3 fuentes
             render_png_dashboard()
-            print(f"[BG WORKER] Imagen actualizada ({datetime.now().strftime('%H:%M:%S')})")
+            print(f"[BG WORKER] Imagen actualizada atómicamente ({datetime.now().strftime('%H:%M:%S')})")
         except Exception as e:
-            print(f"[BG WORKER] Error en ciclo: {e}")
+            print(f"[BG WORKER] Error en ciclo periódico: {e}")
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
@@ -894,6 +900,12 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 with CACHE_LOCK:
                     png_bytes = IMAGE_CACHE.get("bytes")
                 
+                # Si aún no terminó la primera carga completa, esperar hasta 20 segundos a que finalicen las 3 fuentes
+                if not png_bytes:
+                    INITIAL_READY.wait(timeout=20)
+                    with CACHE_LOCK:
+                        png_bytes = IMAGE_CACHE.get("bytes")
+
                 if not png_bytes and os.path.exists("dashboard.png"):
                     with open("dashboard.png", "rb") as f:
                         png_bytes = f.read()
@@ -960,6 +972,10 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             elif self.path in ("/", "/index.html"):
                 with CACHE_LOCK:
                     b64_str = IMAGE_CACHE.get("b64")
+                if not b64_str:
+                    INITIAL_READY.wait(timeout=20)
+                    with CACHE_LOCK:
+                        b64_str = IMAGE_CACHE.get("b64")
                 if not b64_str:
                     _, b64_str = render_png_dashboard()
 
