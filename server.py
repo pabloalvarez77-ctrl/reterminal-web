@@ -4,7 +4,7 @@ Servidor Definitivo para reTerminal E1002 (Spectra 6)
 - Estación Meteorológica fija: Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con fallback a wttr.in/SABE
 - Paleta estricta de los 6 colores primarios Spectra 6 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00)
 - Cálculo y visualización de ETA con Google Maps API:
-  * Solo activo de Lunes a Viernes entre las 15:00 y las 18:00 hs (fuera de esa ventana no consume API y entran 6 citas)
+  * Solo activo de Lunes a Viernes entre las 15:00 y las 19:00 hs (fuera de esa ventana no consume API y entran 6 citas)
   * Origen: BITALI, Planta Industrial Talar -> Destino: Iberá 3544, CABA
   * Barra de 1 sola fila al pie del panel izquierdo con silueta de Ford Bronco Sport dinámica (Verde/Roja según congestión)
 - Exclusión total de "Tiempo de concentración" (libre en timeline y omitido en citas)
@@ -92,9 +92,9 @@ def get_font(size):
     return ImageFont.load_default()
 
 def is_traffic_window(dt):
-    """Solo activo de Lunes a Viernes entre las 15:00 y las 18:00 hs"""
+    """Solo activo de Lunes a Viernes entre las 15:00 y las 19:00 hs (hardcodeado)"""
     is_weekday = (0 <= dt.weekday() <= 4)
-    is_in_hours = (15 <= dt.hour < 18) or (dt.hour == 18 and dt.minute == 0)
+    is_in_hours = (15 <= dt.hour < 19) or (dt.hour == 19 and dt.minute == 0)
     return is_weekday and is_in_hours
 
 def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
@@ -629,7 +629,7 @@ def update_traffic_eta_sync(now_ba, force_check=False):
     Consulta en tiempo real la API de tráfico de Google Maps:
     1. Intenta con la moderna Google Routes API (computeRoutes) - recomendada por Google
     2. Si falla o no está disponible, intenta con la Distance Matrix API (legacy)
-    - Lunes a Viernes de 15:00 a 18:00 hs
+    - Lunes a Viernes de 15:00 a 19:00 hs
     - Entre 15:00 y 17:00 hs: salida proyectada a las 17:00 hs
     - A partir de las 17:00 hs: salida en tiempo real ('now')
     - CERO DATOS INVENTADOS: Si no hay API Key o falla, no se simula ninguna duración
@@ -1000,7 +1000,7 @@ def render_png_dashboard():
 
         draw.line([12, tl_y + 28, 444, tl_y + 28], fill="#000000", width=1)
 
-        # DETERMINAR SI CORRESPONDE MOSTRAR LA BARRA DE TRÁFICO (Lunes a Viernes 15 a 18 hs)
+        # DETERMINAR SI CORRESPONDE MOSTRAR LA BARRA DE TRÁFICO (Lunes a Viernes 15 a 19 hs)
         show_traffic = is_traffic_window(now_ba) and (traffic_info is not None)
         max_events = 5 if show_traffic else 6
 
