@@ -624,29 +624,35 @@ def update_weather_data_sync():
             WEATHER_CACHE["data"] = weather_result
             WEATHER_CACHE["timestamp"] = time.time()
 
-def update_traffic_eta_sync(now_ba):
+def update_traffic_eta_sync(now_ba, force_check=False):
     """
-    Consulta en tiempo real la Google Maps Distance Matrix API:
+    Consulta en tiempo real la API de tráfico de Google Maps:
+    1. Intenta con la moderna Google Routes API (computeRoutes) - recomendada por Google
+    2. Si falla o no está disponible, intenta con la Distance Matrix API (legacy)
     - Lunes a Viernes de 15:00 a 18:00 hs
     - Entre 15:00 y 17:00 hs: salida proyectada a las 17:00 hs
     - A partir de las 17:00 hs: salida en tiempo real ('now')
     - CERO DATOS INVENTADOS: Si no hay API Key o falla, no se simula ninguna duración
+    - Si force_check es True (desde /api/debug_traffic), ejecuta la consulta para diagnosticar
     """
     tz_ba = timezone(timedelta(hours=-3))
+    in_window = is_traffic_window(now_ba)
     debug_tr = {
         "api_key_configured": bool(GOOGLE_MAPS_API_KEY),
         "api_key_preview": (GOOGLE_MAPS_API_KEY[:8] + "...") if GOOGLE_MAPS_API_KEY else "NO_CONFIGURADA",
         "origin": TRAFFIC_ORIGIN,
         "destination": TRAFFIC_DESTINATION,
-        "is_window_active": is_traffic_window(now_ba),
+        "is_window_active": in_window,
         "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
         "departure_param": None,
+        "api_used": None,
         "google_status": None,
         "duration_in_traffic": None,
+        "eta_calculated": None,
         "error": None
     }
 
-    if not is_traffic_window(now_ba):
+    if not in_window and not force_check:
         with CACHE_LOCK:
             TRAFFIC_CACHE["data"] = None
             TRAFFIC_CACHE["debug"] = debug_tr
@@ -675,6 +681,76 @@ def update_traffic_eta_sync(now_ba):
             TRAFFIC_CACHE["debug"] = debug_tr
         return
 
+    # 1. INTENTO CON MODERNA GOOGLE ROUTES API (computeRoutes)
+    try:
+        routes_url = "https://routes.googleapis.com/directions/v2:computeRoutes"
+        try:
+            lat, lng = [float(x.strip()) for x in TRAFFIC_ORIGIN.split(',')]
+            orig_obj = {"location": {"latLng": {"latitude": lat, "longitude": lng}}}
+        except Exception:
+            orig_obj = {"address": TRAFFIC_ORIGIN}
+            
+        try:
+            lat, lng = [float(x.strip()) for x in TRAFFIC_DESTINATION.split(',')]
+            dest_obj = {"location": {"latLng": {"latitude": lat, "longitude": lng}}}
+        except Exception:
+            dest_obj = {"address": TRAFFIC_DESTINATION}
+
+        dep_utc = base_dep_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        routes_payload = {
+            "origin": orig_obj,
+            "destination": dest_obj,
+            "travelMode": "DRIVE",
+            "routingPreference": "TRAFFIC_AWARE",
+            "departureTime": dep_utc
+        }
+        req_data = json.dumps(routes_payload).encode("utf-8")
+        routes_req = urllib.request.Request(
+            routes_url,
+            data=req_data,
+            headers={
+                'Content-Type': 'application/json',
+                'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
+                'X-Goog-FieldMask': 'routes.duration,routes.distanceMeters,routes.staticDuration'
+            },
+            method='POST'
+        )
+        with urllib.request.urlopen(routes_req, timeout=8) as r_resp:
+            r_raw = r_resp.read().decode("utf-8", errors="ignore")
+            r_res = json.loads(r_raw)
+            debug_tr["api_used"] = "Routes API (Modern)"
+            debug_tr["google_response"] = r_res
+            if "routes" in r_res and len(r_res["routes"]) > 0:
+                route = r_res["routes"][0]
+                dur_sec = int(route.get("duration", "0s").rstrip("s"))
+                norm_sec = int(route.get("staticDuration", "1680s").rstrip("s"))
+                dur_mins = round(dur_sec / 60)
+                is_delayed = dur_sec > (norm_sec * 1.25)
+                eta_dt = base_dep_dt + timedelta(seconds=dur_sec)
+                
+                t_info = {
+                    "label": label_salida,
+                    "duration_str": f"{dur_mins} min",
+                    "eta_str": f"{eta_dt.hour:02d}:{eta_dt.minute:02d}",
+                    "status": "DEMORADO" if is_delayed else "FLUIDO",
+                    "color": "#D60000" if is_delayed else "#008833"
+                }
+                debug_tr["google_status"] = "OK"
+                debug_tr["duration_in_traffic"] = f"{dur_mins} min"
+                debug_tr["eta_calculated"] = f"{eta_dt.hour:02d}:{eta_dt.minute:02d}"
+                with CACHE_LOCK:
+                    TRAFFIC_CACHE["data"] = t_info
+                    TRAFFIC_CACHE["debug"] = debug_tr
+                    TRAFFIC_CACHE["timestamp"] = time.time()
+                print(f"[BG WORKER] Tráfico Routes API REAL ({label_salida}): {dur_mins} min (llegada {eta_dt.strftime('%H:%M')})")
+                return
+    except urllib.error.HTTPError as he:
+        err_body = he.read().decode('utf-8', errors='ignore')
+        debug_tr["routes_api_error"] = f"HTTP {he.code}: {err_body}"
+    except Exception as e:
+        debug_tr["routes_api_error"] = str(e)
+
+    # 2. FALLBACK CON DISTANCE MATRIX API (LEGACY)
     try:
         url = (
             f"https://maps.googleapis.com/maps/api/distancematrix/json"
@@ -688,6 +764,7 @@ def update_traffic_eta_sync(now_ba):
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw_json = resp.read().decode('utf-8', errors='ignore')
             res = json.loads(raw_json)
+            debug_tr["api_used"] = "Distance Matrix API (Legacy fallback)"
             debug_tr["google_response"] = res
             
             status_api = res.get("status")
@@ -719,15 +796,16 @@ def update_traffic_eta_sync(now_ba):
                         TRAFFIC_CACHE["data"] = t_info
                         TRAFFIC_CACHE["debug"] = debug_tr
                         TRAFFIC_CACHE["timestamp"] = time.time()
-                    print(f"[BG WORKER] Tráfico Maps REAL ({label_salida}): {dur_mins} min (llegada {eta_dt.strftime('%H:%M')})")
+                    print(f"[BG WORKER] Tráfico Distance Matrix REAL ({label_salida}): {dur_mins} min (llegada {eta_dt.strftime('%H:%M')})")
                     return
                 else:
                     debug_tr["error"] = f"Element status not OK: {elem_status}"
             else:
                 debug_tr["error"] = f"Google API status error: {status_api} - {res.get('error_message', '')}"
     except Exception as e:
-        debug_tr["error"] = f"Exception en llamada Google Maps: {e}"
-        print(f"[BG WORKER] Error Google Maps API: {e}")
+        debug_tr["distance_matrix_error"] = str(e)
+        debug_tr["error"] = f"Fallo Routes API ({debug_tr.get('routes_api_error')}) y Distance Matrix ({e})"
+        print(f"[BG WORKER] Error Google Maps APIs: {e}")
 
     with CACHE_LOCK:
         TRAFFIC_CACHE["data"] = None
@@ -1145,12 +1223,22 @@ def render_png_dashboard():
 def background_worker_loop():
     print("[BG WORKER] Iniciando carga de datos...")
     tz_ba = timezone(timedelta(hours=-3))
-    try:
+
+    def run_all_updates():
         now_ba = datetime.now(tz_ba)
-        update_finance_data_sync()
-        update_weather_data_sync()
-        update_calendar_data_sync()
-        update_traffic_eta_sync(now_ba)
+        for name, fn in [
+            ("Finanzas", update_finance_data_sync),
+            ("Clima", update_weather_data_sync),
+            ("Calendario", update_calendar_data_sync),
+            ("Tráfico", lambda: update_traffic_eta_sync(now_ba))
+        ]:
+            try:
+                fn()
+            except Exception as e:
+                print(f"[BG WORKER] Error en {name}: {e}")
+
+    try:
+        run_all_updates()
         render_png_dashboard()
         INITIAL_READY.set()
         print("[BG WORKER] Primera imagen generada con éxito con TODOS los datos.")
@@ -1162,11 +1250,7 @@ def background_worker_loop():
     while True:
         time.sleep(300)
         try:
-            now_ba = datetime.now(tz_ba)
-            update_finance_data_sync()
-            update_weather_data_sync()
-            update_calendar_data_sync()
-            update_traffic_eta_sync(now_ba)
+            run_all_updates()
             render_png_dashboard()
             print(f"[BG WORKER] Imagen actualizada atómicamente ({datetime.now().strftime('%H:%M:%S')})")
         except Exception as e:
@@ -1240,13 +1324,12 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
             elif self.path.startswith("/api/debug_traffic"):
                 tz_ba = timezone(timedelta(hours=-3))
                 now_ba = datetime.now(tz_ba)
-                force = "refresh=true" in self.path
-                if force:
-                    update_traffic_eta_sync(now_ba)
+                # Ejecutar SIEMPRE la consulta en vivo para diagnóstico inmediato
+                update_traffic_eta_sync(now_ba, force_check=True)
                 with CACHE_LOCK:
                     tr_copy = dict(TRAFFIC_CACHE.get("debug", {}))
                     tr_copy["current_traffic_data"] = TRAFFIC_CACHE.get("data")
-                body = json.dumps(tr_copy, indent=2).encode("utf-8")
+                body = json.dumps(tr_copy, indent=2, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
