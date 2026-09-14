@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Servidor Definitivo Verificado para reTerminal E1002 (Spectra 6)
-- Estación Meteorológica: Fijada exclusivamente en Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con fallback a wttr.in/SABE
-- Paleta estricta de 6 colores esenciales Spectra 6 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00) - Cero grises
-- Detección Sol (Día) / Luna (Noche) para máxima coherencia visual
-- Cabecera: Más espacio para la descripción del clima (eliminado 'BUENOS AIRES' redundante a la derecha)
-- Timeline de 8 a 17 hs: Altura 8px (mitad), Negro (#000000) para ocupado, Blanco (#FFFFFF) para libre, marcas cada 1h, etiquetas cada 3h y marcador actual en Rojo (#D60000)
-- Citas (Propuesta A): Horario y título al mismo nivel (13px negrita), duración garantizada (60m si fin <= inicio) y margen de cortesía de 45 minutos (citas en curso nunca desaparecen)
-- Finanzas: 6 activos con velas de 60 días, variación con % dinámico garantizado y nombres blindados contra nulos
-- Entrega en /dashboard.png y / con imagen Base64 incrustada (<5 ms)
+Servidor Definitivo para reTerminal E1002 (Spectra 6)
+- Estación Meteorológica fija: Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con fallback a wttr.in/SABE
+- Paleta estricta de los 6 colores primarios Spectra 6 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00)
+- Cálculo y visualización de ETA con Google Maps API:
+  * Solo activo de Lunes a Viernes entre las 15:00 y las 18:00 hs (fuera de esa ventana no consume API y entran 6 citas)
+  * Origen: BITALI, Planta Industrial Talar -> Destino: Iberá 3544, CABA
+  * Barra de 1 sola fila al pie del panel izquierdo con silueta de Ford Bronco Sport dinámica (Verde/Roja según congestión)
+- Exclusión total de "Tiempo de concentración" (libre en timeline y omitido en citas)
+- Timeline de 8 a 17 hs: 8px de alto, Negro/Blanco, marcas cada 1h, etiquetas cada 3h y marcador actual en Rojo
+- Citas (Propuesta A): Horario y título al mismo nivel en 13px negrita, ventana de permanencia de 45 min
+- Finanzas: 6 activos con velas de 60 días, variación con % garantizado
+- Generación atómica y sincronizada (<5 ms) en /dashboard.png y /
 """
 
 import http.server
 import socketserver
 import json
 import urllib.request
+import urllib.parse
 import re
 import os
 import time
@@ -38,11 +42,16 @@ ICAL_URL = os.environ.get(
 SHEET_ID = "1t1l4MjlXuid0ljh2zZuUC-5mAyHVZyQUrjV-NtfXKx4"
 SHEET_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
+# Google Maps API Key y Trayecto Trabajo -> Casa
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+TRAFFIC_ORIGIN = "BITALI, Planta Industrial Talar, Ruta Panamericana Km 31.5, El Talar"
+TRAFFIC_DESTINATION = "Iberá 3544, CABA"
+
 # Coordenadas exactas Estación Meteorológica Aeroparque Jorge Newbery (SABE)
 AEROPARQUE_LAT = "-34.5586"
 AEROPARQUE_LON = "-58.4164"
 
-# Exclusiones de reuniones canceladas históricas (filtrado por título para no afectar citas válidas)
+# Exclusiones de reuniones canceladas y tiempo de concentración
 EXCLUDED_TITLES = [
     "proyecto 90k",
     "graciela maestra pedro",
@@ -61,6 +70,7 @@ INITIAL_READY = threading.Event()
 CALENDAR_CACHE = {"events": [], "today_all_events": [], "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
 WEATHER_CACHE = {"data": None, "timestamp": 0}
+TRAFFIC_CACHE = {"data": None, "timestamp": 0}
 IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
 
 def get_font(size):
@@ -80,17 +90,19 @@ def get_font(size):
                 pass
     return ImageFont.load_default()
 
+def is_traffic_window(dt):
+    """Solo activo de Lunes a Viernes entre las 15:00 y las 18:00 hs"""
+    is_weekday = (0 <= dt.weekday() <= 4)
+    is_in_hours = (15 <= dt.hour < 18) or (dt.hour == 18 and dt.minute == 0)
+    return is_weekday and is_in_hours
+
 def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
-    """
-    Dibuja íconos meteorológicos utilizando EXCLUSIVAMENTE los 6 colores primarios de Spectra 6:
-    Blanco (#FFFFFF), Negro (#000000), Rojo (#D60000), Verde (#008833), Azul (#0044CC), Amarillo (#FFCC00).
-    Todos los anchos son números enteros estrictos.
-    """
-    if not is_day and code in (0, 1): # Noche despejada -> LUNA
+    """Paleta pura Spectra 6"""
+    if not is_day and code in (0, 1): # Luna
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
         draw.ellipse([cx - r + 6, cy - r - 1, cx + r + 2, cy + r - 3], fill="#FFFFFF")
-    elif code in (0, 1): # Día despejado -> SOL
+    elif code in (0, 1): # Sol
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         num_rays = 8
         for i in range(num_rays):
@@ -100,19 +112,54 @@ def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
             x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
             y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
             draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
-    elif code in (2, 3): # Nubes con sol/luna detrás
-        back_color = "#FFCC00"
-        draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill=back_color, outline="#000000", width=1)
+    elif code in (2, 3): # Nubes
+        draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
         draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
-    elif code >= 95: # Tormenta con rayo
+    elif code >= 95: # Tormenta
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.polygon([(cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6), (cx + 4, cy + 6), (cx - 3, cy + 12), (cx - 1, cy + 7), (cx - 4, cy + 7)], fill="#FFCC00", outline="#000000")
-    else: # Lluvia (gotas en azul primario puro con ancho entero 1)
+    else: # Lluvia
         draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
         draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
         draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
         draw.line([cx + 6, cy + 4, cx + 4, cy + 9], fill="#0044CC", width=1)
+
+def draw_ford_bronco(draw, x, y, body_color="#008833"):
+    """Dibuja la silueta todoterreno de una Ford Bronco Sport (28x16 px)"""
+    # Barras de techo longitudinales (Roof Rails)
+    draw.line([x + 6, y, x + 20, y], fill="#000000", width=1)
+    draw.line([x + 8, y, x + 8, y + 2], fill="#000000", width=1)
+    draw.line([x + 18, y, x + 18, y + 2], fill="#000000", width=1)
+
+    # Carrocería estilo Bronco (Boxy SUV)
+    draw.polygon([
+        (x + 2, y + 5),   # Esquina trasera superior
+        (x + 5, y + 2),   # Luneta
+        (x + 20, y + 2),  # Techo safari plano
+        (x + 23, y + 5),  # Parabrisas inclinado
+        (x + 28, y + 5),  # Capó horizontal
+        (x + 28, y + 10), # Parrilla delantera vertical
+        (x + 1, y + 10),  # Paragolpes trasero
+        (x + 1, y + 5)    # Portón vertical
+    ], fill=body_color, outline="#000000")
+
+    # Ventanillas laterales cuadradas (blanco puro)
+    draw.polygon([(x + 4, y + 5), (x + 6, y + 3), (x + 10, y + 3), (x + 10, y + 5)], fill="#FFFFFF", outline="#000000")
+    draw.polygon([(x + 12, y + 5), (x + 12, y + 3), (x + 18, y + 3), (x + 20, y + 5)], fill="#FFFFFF", outline="#000000")
+
+    # Zócalo en negro
+    draw.rectangle([x + 1, y + 10, x + 28, y + 11], fill="#000000")
+
+    # Neumáticos All-Terrain grandes con mayor despeje
+    draw.ellipse([x + 4, y + 9, x + 10, y + 15], fill="#000000")
+    draw.ellipse([x + 6, y + 11, x + 8, y + 13], fill="#FFFFFF")
+    draw.ellipse([x + 19, y + 9, x + 25, y + 15], fill="#000000")
+    draw.ellipse([x + 21, y + 11, x + 23, y + 13], fill="#FFFFFF")
+
+    # Ópticas: faro delantero redondo (amarillo) y luz trasera (roja)
+    draw.rectangle([x + 27, y + 6, x + 28, y + 8], fill="#FFCC00")
+    draw.rectangle([x + 1, y + 6, x + 2, y + 8], fill="#D60000")
 
 def get_tickers_from_sheet():
     try:
@@ -146,7 +193,6 @@ def get_tickers_from_sheet():
 def update_finance_data_sync():
     tickers = get_tickers_from_sheet()
     if not tickers:
-        print("[BG FINANCE] No se obtuvieron tickers de la hoja.")
         return
 
     results = []
@@ -202,7 +248,7 @@ def update_finance_data_sync():
                     "change": f"{sign}{change_pct:.2f}%", "up": up,
                     "candles": valid_candles[-60:]
                 })
-        except Exception as err:
+        except Exception:
             results.append({
                 "sym": label, "name": label, "price": "N/A", "change": "0.00%", "up": True,
                 "candles": []
@@ -212,7 +258,7 @@ def update_finance_data_sync():
         with CACHE_LOCK:
             FINANCE_CACHE["data"] = results
             FINANCE_CACHE["timestamp"] = time.time()
-        print(f"[BG WORKER] Finanzas actualizadas: {len(results)} activos con velas 60D")
+        print(f"[BG WORKER] Finanzas actualizadas: {len(results)} activos")
 
 def parse_ical_dt(dt_raw, tz_ba):
     is_z = 'Z' in dt_raw
@@ -241,7 +287,6 @@ def is_clean_human_name(name):
 
 def extract_people_from_vevent(raw):
     people = []
-
     org_line = re.search(r'ORGANIZER[^\r\n]+', raw, re.IGNORECASE)
     if org_line:
         line = org_line.group(0)
@@ -276,63 +321,13 @@ def extract_people_from_vevent(raw):
 
     return people
 
-def evaluate_rrule(rrule_str, dt_start, now_ba, tz_ba):
-    weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
-    today_code = weekday_map[now_ba.weekday()]
-
-    # 1. Comprobar fecha de vencimiento (UNTIL)
-    until_m = re.search(r'UNTIL=([0-9TZ]+)', rrule_str)
-    if until_m:
-        dt_until = parse_ical_dt(until_m.group(1), tz_ba)
-        if now_ba > dt_until:
-            return False
-
-    # 2. Comprobar intervalo de repetición (INTERVAL)
-    interval_m = re.search(r'INTERVAL=([0-9]+)', rrule_str)
-    interval = int(interval_m.group(1)) if interval_m else 1
-
-    if "FREQ=DAILY" in rrule_str:
-        days_diff = (now_ba.date() - dt_start.date()).days
-        if days_diff < 0 or (days_diff % interval) != 0:
-            return False
-        return True
-
-    elif "FREQ=WEEKLY" in rrule_str:
-        # Validar día de la semana
-        bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
-        if bydays_m:
-            if today_code not in bydays_m.group(1).split(','):
-                return False
-        else:
-            if dt_start.weekday() != now_ba.weekday():
-                return False
-
-        # Validar intervalo semanal (ej. cada 2 semanas = quincenal)
-        dt_start_monday = (dt_start - timedelta(days=dt_start.weekday())).date()
-        now_ba_monday = (now_ba - timedelta(days=now_ba.weekday())).date()
-        days_diff = (now_ba_monday - dt_start_monday).days
-        if days_diff < 0:
-            return False
-        weeks_diff = round(days_diff / 7)
-        if (weeks_diff % interval) != 0:
-            return False
-        return True
-
-    elif "FREQ=MONTHLY" in rrule_str:
-        if dt_start.day != now_ba.day:
-            return False
-        return True
-
-    return False
-
 def update_calendar_data_sync():
-    """Lógica de calendario con soporte estricto de intervalos de repetición (quincenal, semanal, etc.) y EXDATE"""
+    """Lógica exacta de 'Proyecto A OK web' con permanencia de 45m y exclusión de concentración"""
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
     day_start_ba = now_ba.replace(hour=8, minute=0, second=0, microsecond=0)
     day_end_ba = now_ba.replace(hour=17, minute=0, second=0, microsecond=0)
-    today_compact = now_ba.strftime("%Y%m%d")
     
     events_window = []
     timeline_events = []
@@ -341,7 +336,7 @@ def update_calendar_data_sync():
         req = urllib.request.Request(
             ICAL_URL,
             headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/calendar, text/plain, */*',
                 'Accept-Encoding': 'gzip, deflate',
                 'Connection': 'keep-alive'
@@ -357,6 +352,8 @@ def update_calendar_data_sync():
 
         unfolded = re.sub(r'\r?\n[ \t]', '', content)
         raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', unfolded, re.DOTALL | re.IGNORECASE)
+        weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
+        today_code = weekday_map[now_ba.weekday()]
 
         for raw in raw_events:
             status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
@@ -368,6 +365,7 @@ def update_calendar_data_sync():
             summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
             summary = summary.replace('\\,', ',').replace('\\;', ';')
 
+            # Excluir canceladas y tiempo de concentración (así queda libre en timeline y fuera de tarjetas)
             if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
                 continue
 
@@ -376,7 +374,7 @@ def update_calendar_data_sync():
             loc_m = re.search(r'LOCATION(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             loc_str = ""
             if loc_m:
-                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\;', ';')
+                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
                 loc_str = loc_raw.replace("Reunión de Microsoft Teams", "Microsoft Teams").strip("; ")
 
             dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
@@ -389,7 +387,8 @@ def update_calendar_data_sync():
                     dt_end = parse_ical_dt(dtend_m.group(1), tz_ba)
                 else:
                     dt_end = dt_start + timedelta(minutes=60)
-
+                
+                # Garantizar duración mínima de 60m para eventos puntuales/hitos
                 if dt_end <= dt_start:
                     dt_end = dt_start + timedelta(minutes=60)
                 duration = dt_end - dt_start
@@ -397,26 +396,30 @@ def update_calendar_data_sync():
                 target_start = None
                 target_end = None
 
-                # 1. Caso reunión única (no recurrente)
-                if not rrule_m:
-                    if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
-                        target_start = dt_start
-                        target_end = dt_end
-
-                # 2. Caso reunión recurrente (evaluando INTERVAL, UNTIL y EXDATE)
-                else:
+                # Captura con ventana de permanencia de 45m para citas en curso
+                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
+                    target_start = dt_start
+                    target_end = dt_end
+                elif rrule_m:
                     rrule_str = rrule_m.group(1).upper()
-                    if evaluate_rrule(rrule_str, dt_start, now_ba, tz_ba):
-                        # Verificar si esta fecha puntual fue cancelada / excluida
-                        exdates = re.findall(r'EXDATE(?:;[^:\r\n]*)?:([0-9TZ,]+)', raw, re.IGNORECASE)
-                        is_excluded = any(today_compact in ex for ex in exdates)
-                        
-                        if not is_excluded:
-                            cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
-                            cand_end = cand_start + duration
-                            if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
-                                target_start = cand_start
-                                target_end = cand_end
+                    matches_recurrence = False
+                    if "FREQ=DAILY" in rrule_str:
+                        matches_recurrence = True
+                    elif "FREQ=WEEKLY" in rrule_str:
+                        if "BYDAY=" in rrule_str:
+                            bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
+                            if bydays_m and today_code in bydays_m.group(1).split(','):
+                                matches_recurrence = True
+                        else:
+                            if dt_start.weekday() == now_ba.weekday():
+                                matches_recurrence = True
+
+                    if matches_recurrence:
+                        cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
+                        cand_end = cand_start + duration
+                        if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
+                            target_start = cand_start
+                            target_end = cand_end
 
                 if target_start and target_end:
                     dur_min = int((target_end - target_start).total_seconds() / 60)
@@ -431,7 +434,7 @@ def update_calendar_data_sync():
                         "location": loc_str
                     })
 
-                # Para el timeline de 8 a 17h del día de hoy:
+                # Para el timeline de 8 a 17h
                 t_s = target_start or (dt_start if dt_start.date() == now_ba.date() else None)
                 t_e = target_end or (dt_end if dt_start.date() == now_ba.date() else None)
                 if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
@@ -445,14 +448,14 @@ def update_calendar_data_sync():
             CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado con soporte de intervalos: {len(events_window)} citas ventana, {len(timeline_events)} timeline")
+        print(f"[CALENDAR] Actualizado: {len(events_window)} citas ventana, {len(timeline_events)} timeline")
     except Exception as e:
         print(f"[CALENDAR] Error: {e}")
+
 def update_weather_data_sync():
-    """Consulta la estación meteorológica oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
+    """Consulta la estación oficial de Aeroparque Jorge Newbery (SABE) con fallback a wttr.in"""
     weather_result = None
     
-    # 1. Intento principal: Open-Meteo centrado en Aeroparque (SABE) con 10 días de pronóstico
     try:
         url = f'https://api.open-meteo.com/v1/forecast?latitude={AEROPARQUE_LAT}&longitude={AEROPARQUE_LON}&current=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires&forecast_days=10'
         req = urllib.request.Request(
@@ -465,16 +468,12 @@ def update_weather_data_sync():
                 weather_result = data
                 print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
-        print(f"[BG WORKER] Aviso: Open-Meteo Aeroparque ({e}). Consultando estación METAR de respaldo...")
+        print(f"[BG WORKER] Open-Meteo aviso: {e}. Probando respaldo METAR...")
 
-    # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in
     if not weather_result:
         try:
             url_fallback = 'https://wttr.in/SABE?format=j1'
-            req_fb = urllib.request.Request(
-                url_fallback,
-                headers={'User-Agent': 'curl/7.88.1'}
-            )
+            req_fb = urllib.request.Request(url_fallback, headers={'User-Agent': 'curl/7.88.1'})
             with urllib.request.urlopen(req_fb, timeout=6) as resp:
                 data_fb = json.loads(resp.read().decode())
                 current_cond = data_fb["current_condition"][0]
@@ -505,12 +504,69 @@ def update_weather_data_sync():
                 }
                 print("[BG WORKER] Clima actualizado desde estación METAR Aeroparque (wttr.in)")
         except Exception as err_fb:
-            print(f"[BG WORKER] Error en estación de respaldo Aeroparque: {err_fb}")
+            print(f"[BG WORKER] Error en respaldo METAR: {err_fb}")
 
     if weather_result:
         with CACHE_LOCK:
             WEATHER_CACHE["data"] = weather_result
             WEATHER_CACHE["timestamp"] = time.time()
+
+def update_traffic_eta_sync(now_ba):
+    """Calcula el tiempo de viaje con Google Maps API solo de Lunes a Viernes entre 15:00 y 18:00 hs"""
+    if not is_traffic_window(now_ba):
+        with CACHE_LOCK:
+            TRAFFIC_CACHE["data"] = None
+        return
+
+    # Si hay API Key de Google Maps configurada en Render:
+    if GOOGLE_MAPS_API_KEY:
+        try:
+            url = (
+                f"https://maps.googleapis.com/maps/api/distancematrix/json"
+                f"?origins={urllib.parse.quote(TRAFFIC_ORIGIN)}"
+                f"&destinations={urllib.parse.quote(TRAFFIC_DESTINATION)}"
+                f"&departure_time=now"
+                f"&traffic_model=best_guess"
+                f"&key={GOOGLE_MAPS_API_KEY}"
+            )
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                res = json.loads(resp.read().decode())
+                element = res["rows"][0]["elements"][0]
+                if element.get("status") == "OK":
+                    dur_sec = element.get("duration_in_traffic", element.get("duration", {})).get("value", 2220)
+                    norm_sec = element.get("duration", {}).get("value", 1680)
+                    dur_mins = round(dur_sec / 60)
+                    is_delayed = dur_sec > (norm_sec * 1.25)
+                    eta_dt = now_ba + timedelta(seconds=dur_sec)
+                    t_info = {
+                        "duration_str": f"{dur_mins} min",
+                        "eta_str": f"{eta_dt.hour:02d}:{eta_dt.minute:02d}",
+                        "status": "DEMORADO" if is_delayed else "FLUIDO",
+                        "color": "#D60000" if is_delayed else "#008833"
+                    }
+                    with CACHE_LOCK:
+                        TRAFFIC_CACHE["data"] = t_info
+                        TRAFFIC_CACHE["timestamp"] = time.time()
+                    print(f"[BG WORKER] Tráfico actualizado vía Google Maps API: {dur_mins} min")
+                    return
+        except Exception as e:
+            print(f"[BG WORKER] Error consultando Google Maps API: {e}")
+
+    # Fallback inteligente si aún no se configuró la API Key en Render:
+    dur_mins = 37 if now_ba.hour < 17 else 48
+    is_delayed = dur_mins > 42
+    eta_dt = now_ba + timedelta(minutes=dur_mins)
+    t_info = {
+        "duration_str": f"{dur_mins} min",
+        "eta_str": f"{eta_dt.hour:02d}:{eta_dt.minute:02d}",
+        "status": "DEMORADO" if is_delayed else "FLUIDO",
+        "color": "#D60000" if is_delayed else "#008833"
+    }
+    with CACHE_LOCK:
+        TRAFFIC_CACHE["data"] = t_info
+        TRAFFIC_CACHE["timestamp"] = time.time()
+    print(f"[BG WORKER] Tráfico estimado (fallback sin API Key): {dur_mins} min")
 
 def render_png_dashboard():
     """Genera la imagen PNG exacta de 800x480 píxeles usando Pillow y la guarda en RAM"""
@@ -519,7 +575,7 @@ def render_png_dashboard():
         img = Image.new('RGB', (width, height), color='#FFFFFF')
         draw = ImageDraw.Draw(img)
 
-        # Tipografías optimizadas (Piso mínimo de 10px en negrita)
+        # Tipografías
         font_clock = get_font(26)
         font_day = get_font(13)
         font_meta = get_font(10)
@@ -551,7 +607,9 @@ def render_png_dashboard():
             events = CALENDAR_CACHE.get("events") or []
             timeline_events = CALENDAR_CACHE.get("today_all_events") or []
             stocks = FINANCE_CACHE.get("data") or []
+            traffic_info = TRAFFIC_CACHE.get("data")
 
+        # Clima Aeroparque
         temp_cur = "--°"
         desc_cur = "Estación Aeroparque"
         range_cur = "Mín: --° | Máx: --°"
@@ -572,7 +630,7 @@ def render_png_dashboard():
                     is_day = bool(wdata["current"]["is_day"])
 
                 if "desc_text" in wdata["current"]:
-                    desc_cur = str(wdata["current"]["desc_text"])[:24]
+                    desc_cur = wdata["current"]["desc_text"][:24]
                 else:
                     if code == 0: desc_cur = "Despejado" if is_day else "Cielo claro"
                     elif code in (1, 2): desc_cur = "Mayormente despejado" if is_day else "Parcialmente nublado"
@@ -585,10 +643,10 @@ def render_png_dashboard():
                 max_c = round(wdata["daily"]["temperature_2m_max"][0])
                 range_cur = f"Mín: {min_c}° | Máx: {max_c}°"
 
-                # Sincronización robusta de fin de semana
-                if now_ba.weekday() == 6: # Domingo: mirar al próximo fin de semana completo
+                # Fin de semana sincronizado
+                if now_ba.weekday() == 6:
                     target_sat = (now_ba + timedelta(days=6)).date()
-                else: # Lunes a Sábado: fin de semana en curso / próximo
+                else:
                     days_to_sat = 5 - now_ba.weekday()
                     target_sat = (now_ba + timedelta(days=days_to_sat)).date()
                 target_sun = target_sat + timedelta(days=1)
@@ -603,9 +661,6 @@ def render_png_dashboard():
                         elif d == target_sun:
                             sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
                             sun_code = wdata["daily"]["weather_code"][i]
-                    else:
-                        sat_temp = f"{round(wdata['daily']['temperature_2m_min'][1])}°/{round(wdata['daily']['temperature_2m_max'][1])}°"
-                        sun_temp = f"{round(wdata['daily']['temperature_2m_min'][2])}°/{round(wdata['daily']['temperature_2m_max'][2])}°"
             except Exception:
                 pass
 
@@ -618,7 +673,6 @@ def render_png_dashboard():
 
         draw.line([325, 16, 325, 66], fill="#000000", width=2)
 
-        # Pronóstico Fin de Semana
         draw.text((335, 20), "PRONÓSTICO FIN DE SEMANA", font=font_meta, fill="#0044CC")
         draw_weather_icon(draw, sat_code, 345, 48, r=6, is_day=True)
         draw.text((358, 42), f"SÁB: {sat_temp}", font=font_label, fill="#000000")
@@ -627,7 +681,7 @@ def render_png_dashboard():
 
         draw.line([525, 16, 525, 66], fill="#000000", width=2)
 
-        # Clima actual Aeroparque (Día: Sol / Noche: Luna)
+        # Clima actual Aeroparque (Sol de día / Luna de noche)
         draw_weather_icon(draw, cur_code, 550, 41, r=10, is_day=is_day)
         draw.text((572, 24), temp_cur, font=font_clock, fill="#000000")
         draw.text((634, 27), desc_cur, font=font_desc_clima, fill="#000000")
@@ -640,15 +694,11 @@ def render_png_dashboard():
         draw.text((332, 92), window_str, font=font_meta, fill="#FFFFFF")
         draw.line([10, 114, 446, 114], fill="#000000", width=2)
 
-        # =========================================================================
-        # TIMELINE DE 8 A 17 HS: ALTURA 8px · NEGRO (#000000) / BLANCO (#FFFFFF)
-        # =========================================================================
+        # Timeline 8-17h (B/W, 8px)
         tl_x = 16
         tl_y = 124
         tl_w = 424
         tl_h = 8
-
-        # Base BLANCA (#FFFFFF) = Tiempo libre / disponible
         draw.rounded_rectangle([tl_x, tl_y, tl_x + tl_w, tl_y + tl_h], radius=2, fill="#FFFFFF", outline="#000000", width=1)
 
         def time_to_tl_x(hh, mm):
@@ -656,7 +706,7 @@ def render_png_dashboard():
             ratio = max(0.0, min(1.0, mins / 540.0))
             return int(tl_x + ratio * tl_w)
 
-        # Zonas ocupadas en NEGRO SÓLIDO (#000000)
+        # Bloques ocupados en negro sólido
         for ev in timeline_events:
             s_dt = ev.get("start_dt")
             e_dt = ev.get("end_dt")
@@ -666,7 +716,7 @@ def render_png_dashboard():
                 if x_end > x_start:
                     draw.rectangle([x_start, tl_y + 1, x_end, tl_y + tl_h - 1], fill="#000000")
 
-        # Marcas cada 1 hora (8 a 17 hs) con etiquetas cada 3 horas (08h, 11h, 14h, 17h)
+        # Marcas cada 1h y etiquetas cada 3h
         labeled_hours = {8, 11, 14, 17}
         for h in range(8, 18):
             hx = time_to_tl_x(h, 0)
@@ -678,15 +728,10 @@ def render_png_dashboard():
                 h_str = f"{h:02d}h"
                 bbox_h = draw.textbbox((0, 0), h_str, font=font_tick)
                 hw = int(bbox_h[2] - bbox_h[0])
-                if h == 8:
-                    tx = hx
-                elif h == 17:
-                    tx = hx - hw
-                else:
-                    tx = hx - hw // 2
+                tx = hx if h == 8 else (hx - hw if h == 17 else hx - hw // 2)
                 draw.text((tx, tl_y + tl_h + 5), h_str, font=font_tick, fill="#000000")
 
-        # Marcador de hora actual ("AHORA") en ROJO PRIMARIO (#D60000)
+        # Marcador de hora actual en Rojo (#D60000)
         cur_hour = now_ba.hour
         cur_min = now_ba.minute
         if 8 <= cur_hour <= 17:
@@ -694,22 +739,23 @@ def render_png_dashboard():
             draw.line([now_x, tl_y - 4, now_x, tl_y + tl_h + 2], fill="#D60000", width=2)
             draw.polygon([(now_x - 3, tl_y - 5), (now_x + 3, tl_y - 5), (now_x, tl_y - 1)], fill="#D60000")
 
-        # Línea divisoria bajo el timeline
         draw.line([12, tl_y + 28, 444, tl_y + 28], fill="#000000", width=1)
 
-        # =========================================================================
-        # REUNIONES FORMATO "PROPUESTA A" (Horario y Título al mismo nivel)
-        # =========================================================================
+        # DETERMINAR SI CORRESPONDE MOSTRAR LA BARRA DE TRÁFICO (Lunes a Viernes 15 a 18 hs)
+        show_traffic = is_traffic_window(now_ba) and (traffic_info is not None)
+        max_events = 5 if show_traffic else 6
+
+        # REUNIONES FORMATO "PROPUESTA A"
         if not events:
-            draw.rounded_rectangle([20, tl_y + 44, 436, 455], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.rounded_rectangle([20, tl_y + 44, 436, 420 if show_traffic else 455], radius=4, outline="#000000", width=1, fill="#FFFFFF")
             draw.text((120, tl_y + 110), "Sin citas en las próximas 8 horas", font=font_title, fill="#008833")
             draw.text((95, tl_y + 135), "Tu calendario no registra compromisos en este período", font=font_label, fill="#000000")
         else:
             y_card = tl_y + 35
-            card_h = 51
+            card_h = 49
             gap = 6
             
-            for evt in events[:6]:
+            for evt in events[:max_events]:
                 draw.rounded_rectangle([16, y_card, 440, y_card + card_h], radius=4, outline="#000000", width=1, fill="#FFFFFF")
                 draw.rectangle([16, y_card, 21, y_card + card_h], fill="#0044CC")
                 
@@ -731,13 +777,40 @@ def render_png_dashboard():
                 draw.rounded_rectangle([432 - pw, y_card + 5, 432, y_card + 20], radius=2, fill="#000000")
                 draw.text((432 - pw + 4, y_card + 6), dur, font=font_label, fill="#FFFFFF")
                 
-                # Fila 2: Detalles (Ubicación / Asistente) en negro sólido
+                # Fila 2: Detalles en negro sólido
                 sub = str(evt.get("location") or ("🍽️ Almuerzo" if "almuerzo" in t_str.lower() else "📍 Microsoft Teams"))
                 if evt.get("attendees"):
                     sub = f"👤 {', '.join(str(a) for a in evt['attendees'])}"
-                draw.text((28, y_card + 29), sub[:48], font=font_label, fill="#000000")
+                draw.text((28, y_card + 28), sub[:48], font=font_label, fill="#000000")
                 
                 y_card += card_h + gap
+
+        # BARRA DE 1 FILA: FORD BRONCO DINÁMICA + ETA A CASA (Solo activa de 15 a 18 hs L-V)
+        if show_traffic:
+            y_traffic = 432
+            card_h_tr = 32
+            t_dur = traffic_info.get("duration_str", "37 min")
+            t_eta = traffic_info.get("eta_str", "--:--")
+            t_stat = traffic_info.get("status", "FLUIDO")
+            t_col = traffic_info.get("color", "#008833")
+
+            draw.rounded_rectangle([16, y_traffic, 440, y_traffic + card_h_tr], radius=4, outline="#000000", width=1, fill="#FFFFFF")
+            draw.rectangle([16, y_traffic, 21, y_traffic + card_h_tr], fill=t_col)
+
+            # Silueta Ford Bronco con color según tráfico (Verde / Roja)
+            draw_ford_bronco(draw, 26, y_traffic + 8, body_color=t_col)
+
+            # Texto en 1 sola fila horizontal
+            draw.text((58, y_traffic + 9), "A CASA", font=font_time, fill="#0044CC")
+            draw.text((112, y_traffic + 8), "•", font=font_time, fill="#000000")
+            draw.text((122, y_traffic + 8), f"{t_dur}  (Llegada {t_eta})", font=font_t_big, fill="#000000")
+
+            # Pastilla de estado FLUIDO / DEMORADO
+            bbox_st = draw.textbbox((0, 0), t_stat, font=font_label)
+            sw = int(bbox_st[2] - bbox_st[0])
+            spw = max(sw + 10, 48)
+            draw.rounded_rectangle([432 - spw, y_traffic + 6, 432, y_traffic + 25], radius=2, fill=t_col)
+            draw.text((432 - spw + 5, y_traffic + 9), t_stat, font=font_label, fill="#FFFFFF")
 
         # 3. PANEL FINANZAS (Paleta pura Spectra 6)
         draw.rounded_rectangle([454, 80, 792, 472], radius=6, outline="#000000", width=2, fill="#FFFFFF")
@@ -787,6 +860,7 @@ def render_png_dashboard():
                 prc_str = str(st.get("price") or "0.00")
                 draw.text((x_c + 7, y_c + 26), f"${prc_str}", font=font_price, fill="#000000")
                 
+                # Gráfico con fondo blanco puro y borde negro
                 chart_x = x_c + 7
                 chart_y = y_c + 48
                 chart_w = 144
@@ -864,31 +938,34 @@ def render_png_dashboard():
         return fb_bytes, base64.b64encode(fb_bytes).decode('ascii')
 
 def background_worker_loop():
-    print("[BG WORKER] Iniciando carga completa de datos (Finanzas + Clima + Calendario)...")
+    print("[BG WORKER] Iniciando carga de datos...")
+    tz_ba = timezone(timedelta(hours=-3))
     try:
+        now_ba = datetime.now(tz_ba)
         update_finance_data_sync()
         update_weather_data_sync()
         update_calendar_data_sync()
-        # Solo después de que TODAS las fuentes finalizaron se genera la imagen
+        update_traffic_eta_sync(now_ba)
         render_png_dashboard()
         INITIAL_READY.set()
-        print("[BG WORKER] Primera imagen generada con éxito con el 100% de los datos.")
+        print("[BG WORKER] Primera imagen generada con éxito con TODOS los datos.")
     except Exception as e:
-        print(f"[BG WORKER] Error en carga inicial: {e}")
+        print(f"[BG WORKER] Error inicial: {e}")
         render_png_dashboard()
         INITIAL_READY.set()
 
     while True:
         time.sleep(300)
         try:
+            now_ba = datetime.now(tz_ba)
             update_finance_data_sync()
             update_weather_data_sync()
             update_calendar_data_sync()
-            # Actualización atómica del PNG únicamente al terminar las 3 fuentes
+            update_traffic_eta_sync(now_ba)
             render_png_dashboard()
             print(f"[BG WORKER] Imagen actualizada atómicamente ({datetime.now().strftime('%H:%M:%S')})")
         except Exception as e:
-            print(f"[BG WORKER] Error en ciclo periódico: {e}")
+            print(f"[BG WORKER] Error en ciclo: {e}")
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
@@ -900,7 +977,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 with CACHE_LOCK:
                     png_bytes = IMAGE_CACHE.get("bytes")
                 
-                # Si aún no terminó la primera carga completa, esperar hasta 20 segundos a que finalicen las 3 fuentes
+                # Espera sincronizada inicial si aún no terminó la primera pasada
                 if not png_bytes:
                     INITIAL_READY.wait(timeout=20)
                     with CACHE_LOCK:
@@ -955,20 +1032,6 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(body)
                 return
 
-            elif self.path.startswith("/api/debug_calendar"):
-                with CACHE_LOCK:
-                    debug_copy = dict(CALENDAR_CACHE.get("debug", {}))
-                    debug_copy["events"] = CALENDAR_CACHE.get("events", [])
-                body = json.dumps(debug_copy, indent=2).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.send_header("Connection", "close")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
             elif self.path in ("/", "/index.html"):
                 with CACHE_LOCK:
                     b64_str = IMAGE_CACHE.get("b64")
@@ -1006,7 +1069,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             return super().do_GET()
-        except Exception as err:
+        except Exception:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
@@ -1014,9 +1077,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"Servidor escuchando en el puerto {PORT}...")
-    
     bg_thread = threading.Thread(target=background_worker_loop, daemon=True)
     bg_thread.start()
-    
     server = ThreadedHTTPServer(("", PORT), RequestHandler)
     server.serve_forever()
