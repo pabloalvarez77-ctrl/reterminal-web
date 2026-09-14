@@ -696,14 +696,15 @@ def update_traffic_eta_sync(now_ba, force_check=False):
         except Exception:
             dest_obj = {"address": TRAFFIC_DESTINATION}
 
-        dep_utc = base_dep_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         routes_payload = {
             "origin": orig_obj,
             "destination": dest_obj,
             "travelMode": "DRIVE",
-            "routingPreference": "TRAFFIC_AWARE",
-            "departureTime": dep_utc
+            "routingPreference": "TRAFFIC_AWARE"
         }
+        if is_before_17:
+            dep_utc = base_dep_dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            routes_payload["departureTime"] = dep_utc
         req_data = json.dumps(routes_payload).encode("utf-8")
         routes_req = urllib.request.Request(
             routes_url,
