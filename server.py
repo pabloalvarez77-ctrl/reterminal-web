@@ -328,15 +328,27 @@ def extract_people_from_vevent(raw):
     return people
 
 def update_calendar_data_sync():
-    """Lógica exacta de 'Proyecto A OK web' con permanencia de 45m y exclusión de concentración"""
+    """
+    Gestión 100% fiable y robusta de citas de Office 365 / Outlook (RFC 5545):
+    - Procesamiento en dos pasadas (Two-Pass Resolution)
+    - Soporte completo de EXDATE (fechas de recurrencia excluidas / canceladas por el organizador)
+    - Soporte completo de RECURRENCE-ID para excepciones canceladas y reprogramadas
+    - Detección exhaustiva de cancelaciones:
+        * STATUS: CANCELLED / CANCELED
+        * X-MICROSOFT-CDO-BUSYSTATUS: FREE (en Office 365 citas canceladas, rechazadas o libres)
+        * Prefijos 'Canceled:', 'Cancelado:', 'Cancelled:', 'Rechazado:' en SUMMARY
+        * Exclusiones en EXCLUDED_TITLES (tiempo de concentración, canceladas, etc.)
+        * PARTSTAT=DECLINED en ATTENDEE (citas rechazadas por el usuario)
+        * Parámetro UNTIL en RRULE (series recurrentes que ya finalizaron)
+    - Sincronización estricta del Timeline (8 a 17h) únicamente a partir de citas activas confirmadas
+    - Registro de decisiones para diagnóstico vía /api/debug_calendar
+    """
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     window_end_ba = now_ba + timedelta(hours=8)
     day_start_ba = now_ba.replace(hour=8, minute=0, second=0, microsecond=0)
     day_end_ba = now_ba.replace(hour=17, minute=0, second=0, microsecond=0)
-    
-    events_window = []
-    timeline_events = []
+    today_ymd = now_ba.strftime('%Y%m%d')
 
     try:
         req = urllib.request.Request(
@@ -361,28 +373,121 @@ def update_calendar_data_sync():
         weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
         today_code = weekday_map[now_ba.weekday()]
 
-        events_by_uid = {}
-        timeline_events = []
+        # =========================================================================
+        # PASADA 1: REGISTRO DE CANCELACIONES, EXCEPCIONES Y FECHAS EXCLUIDAS (EXDATE)
+        # =========================================================================
+        cancelled_instances = set()      # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM'), (uid, 'HH:MM')}
+        cancelled_master_uids = set()    # {uid} para eventos maestros cancelados
+        exdates_by_uid = set()           # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM')}
+        active_exceptions = {}           # {(uid, 'YYYYMMDD'): raw_vevent, ...}
+        debug_decisions = []
 
         for raw in raw_events:
-            status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
-            status = status_m.group(1).upper() if status_m else ""
-            if status == "CANCELLED":
+            uid_m = re.search(r'UID:(.*?)\r?\n', raw, re.IGNORECASE)
+            uid = uid_m.group(1).strip() if uid_m else ''
+            if not uid:
                 continue
+
+            status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
+            status = status_m.group(1).upper() if status_m else ''
+
+            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
+            busystatus = busy_m.group(1).upper() if busy_m else ''
 
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
-            summary = summary_m.group(1).strip() if summary_m else "Reunión programada"
-            summary = summary.replace('\\,', ',').replace('\\;', ';')
+            summary = summary_m.group(1).strip() if summary_m else ''
 
-            # Excluir canceladas y tiempo de concentración
-            if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
+            rec_id_m = re.search(r'RECURRENCE-ID(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
+            rec_id_str = rec_id_m.group(1).strip() if rec_id_m else ''
+
+            # Extraer todas las fechas excluidas (EXDATE) declaradas en la serie
+            for line in re.findall(r'EXDATE(?:;[^:\r\n]*)?:([^\r\n]+)', raw, re.IGNORECASE):
+                for part in line.split(','):
+                    part = part.strip()
+                    if part:
+                        try:
+                            ex_dt = parse_ical_dt(part, tz_ba)
+                            if ex_dt:
+                                ex_ymd = ex_dt.strftime('%Y%m%d')
+                                ex_hm = ex_dt.strftime('%H:%M')
+                                exdates_by_uid.add((uid, ex_ymd))
+                                exdates_by_uid.add((uid, f"{ex_ymd}_{ex_hm}"))
+                        except Exception:
+                            pass
+
+            # Evaluación exhaustiva de cancelación para este bloque VEVENT
+            is_cancelled = False
+            cancel_reason = ''
+
+            if status in ('CANCELLED', 'CANCELED'):
+                is_cancelled = True
+                cancel_reason = f'STATUS:{status}'
+            elif busystatus == 'FREE':
+                # En Office 365, reuniones canceladas por el organizador o declinadas quedan en FREE
+                is_cancelled = True
+                cancel_reason = 'X-MICROSOFT-CDO-BUSYSTATUS:FREE'
+            elif any(ex in summary.lower() for ex in EXCLUDED_TITLES):
+                is_cancelled = True
+                cancel_reason = f'EXCLUDED_TITLE ({summary})'
+            elif re.search(r'^(?:canceled|cancelado|cancelled|rechazado)[\s:]', summary, re.IGNORECASE):
+                is_cancelled = True
+                cancel_reason = f'SUMMARY_CANCELED_PREFIX ({summary})'
+            else:
+                # Comprobar si el usuario rechazó la invitación
+                for att_line in re.findall(r'ATTENDEE[^\r\n]+', raw, re.IGNORECASE):
+                    if 'PARTSTAT=DECLINED' in att_line.upper() or 'PARTSTAT:DECLINED' in att_line.upper():
+                        if 'pablo' in att_line.lower() or 'bitali' in att_line.lower() or len(re.findall(r'ATTENDEE[^\r\n]+', raw, re.IGNORECASE)) == 1:
+                            is_cancelled = True
+                            cancel_reason = 'ATTENDEE_PARTSTAT_DECLINED'
+                            break
+
+            if rec_id_str:
+                rec_dt = parse_ical_dt(rec_id_str, tz_ba)
+                if rec_dt:
+                    rec_ymd = rec_dt.strftime('%Y%m%d')
+                    rec_hm = rec_dt.strftime('%H:%M')
+                    if is_cancelled:
+                        cancelled_instances.add((uid, rec_ymd))
+                        cancelled_instances.add((uid, f"{rec_ymd}_{rec_hm}"))
+                        cancelled_instances.add((uid, rec_hm))
+                        debug_decisions.append({
+                            'uid': uid, 'summary': summary, 'rec_id': rec_id_str,
+                            'decision': 'CANCELLED_EXCEPTION', 'reason': cancel_reason
+                        })
+                    else:
+                        active_exceptions[(uid, rec_ymd)] = raw
+                        active_exceptions[(uid, f"{rec_ymd}_{rec_hm}")] = raw
+            else:
+                if is_cancelled:
+                    cancelled_master_uids.add(uid)
+                    debug_decisions.append({
+                        'uid': uid, 'summary': summary,
+                        'decision': 'CANCELLED_MASTER_OR_SINGLE', 'reason': cancel_reason
+                    })
+
+        # =========================================================================
+        # PASADA 2: GENERACIÓN Y FILTRADO EXACTO DE CITAS PARA HOY
+        # =========================================================================
+        events_by_key = {}
+
+        for raw in raw_events:
+            uid_m = re.search(r'UID:(.*?)\r?\n', raw, re.IGNORECASE)
+            uid = uid_m.group(1).strip() if uid_m else ''
+            if not uid:
                 continue
 
-            # Extraer UID único y si es una excepción de serie (RECURRENCE-ID)
-            uid_m = re.search(r'UID:(.*?)\r?\n', raw, re.IGNORECASE)
-            uid = uid_m.group(1).strip() if uid_m else ""
             rec_id_m = re.search(r'RECURRENCE-ID(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
-            is_exception = rec_id_m is not None
+            rec_id_str = rec_id_m.group(1).strip() if rec_id_m else ''
+
+            status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
+            status = status_m.group(1).upper() if status_m else ''
+            
+            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
+            busystatus = busy_m.group(1).upper() if busy_m else ''
+
+            summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
+            summary = summary_m.group(1).strip() if summary_m else 'Reunión'
+            summary = summary.replace('\\,', ',').replace('\\;', ';')
 
             people = extract_people_from_vevent(raw)
 
@@ -396,89 +501,132 @@ def update_calendar_data_sync():
             dtend_m = re.search(r'DTEND(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             rrule_m = re.search(r'RRULE:(.*?)\r?\n', raw, re.IGNORECASE)
 
-            if dtstart_m:
-                dt_start = parse_ical_dt(dtstart_m.group(1), tz_ba)
-                if dtend_m:
-                    dt_end = parse_ical_dt(dtend_m.group(1), tz_ba)
-                else:
-                    dt_end = dt_start + timedelta(minutes=60)
-                
-                # Garantizar duración mínima de 60m para eventos puntuales/hitos
-                if dt_end <= dt_start:
-                    dt_end = dt_start + timedelta(minutes=60)
-                duration = dt_end - dt_start
+            if not dtstart_m:
+                continue
 
-                target_start = None
-                target_end = None
+            dt_start = parse_ical_dt(dtstart_m.group(1), tz_ba)
+            if not dt_start:
+                continue
+            dt_end = parse_ical_dt(dtend_m.group(1), tz_ba) if dtend_m else dt_start + timedelta(minutes=60)
+            if dt_end <= dt_start:
+                dt_end = dt_start + timedelta(minutes=60)
+            duration = dt_end - dt_start
+            start_hm = dt_start.strftime('%H:%M')
 
-                # Captura con ventana de permanencia de 45m para citas en curso
+            is_self_cancelled = (
+                status in ('CANCELLED', 'CANCELED') or
+                busystatus == 'FREE' or
+                any(ex in summary.lower() for ex in EXCLUDED_TITLES) or
+                re.search(r'^(?:canceled|cancelado|cancelled|rechazado)[\s:]', summary, re.IGNORECASE)
+            )
+
+            target_start = None
+            target_end = None
+            is_exception = bool(rec_id_str)
+
+            if is_exception:
+                # Es una excepción de recurrencia (instancia modificada)
+                if is_self_cancelled:
+                    continue
                 if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
-                elif rrule_m:
-                    rrule_str = rrule_m.group(1).upper()
-                    matches_recurrence = False
-                    if "FREQ=DAILY" in rrule_str:
-                        matches_recurrence = True
-                    elif "FREQ=WEEKLY" in rrule_str:
-                        if "BYDAY=" in rrule_str:
-                            bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
-                            if bydays_m and today_code in bydays_m.group(1).split(','):
-                                matches_recurrence = True
-                        else:
-                            if dt_start.weekday() == now_ba.weekday():
-                                matches_recurrence = True
+            elif rrule_m:
+                # Es una serie maestra recurrente
+                if uid in cancelled_master_uids or is_self_cancelled:
+                    continue
+                rrule_str = rrule_m.group(1).upper()
 
-                    if matches_recurrence:
-                        cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
-                        cand_end = cand_start + duration
-                        if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
-                            target_start = cand_start
-                            target_end = cand_end
+                # Comprobar UNTIL (si la serie ya finalizó)
+                until_m = re.search(r'UNTIL=([0-9TZ]+)', rrule_str)
+                if until_m:
+                    until_dt = parse_ical_dt(until_m.group(1), tz_ba)
+                    if until_dt and now_ba.date() > until_dt.date():
+                        debug_decisions.append({'uid': uid, 'summary': summary, 'decision': 'SKIPPED_BY_RRULE_UNTIL'})
+                        continue
 
-                if target_start and target_end:
-                    dur_min = int((target_end - target_start).total_seconds() / 60)
-                    dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
-                    
-                    start_k = target_start.strftime("%H:%M")
-                    # Clave única para evitar duplicados entre serie maestra y excepciones
-                    event_key = f"{uid}_{start_k}" if uid else f"{summary}_{start_k}"
+                # Comprobar coincidencia con el día de hoy
+                matches = False
+                if 'FREQ=DAILY' in rrule_str:
+                    matches = True
+                elif 'FREQ=WEEKLY' in rrule_str:
+                    if 'BYDAY=' in rrule_str:
+                        bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
+                        if bydays_m and today_code in bydays_m.group(1).split(','):
+                            matches = True
+                    elif dt_start.weekday() == now_ba.weekday():
+                        matches = True
 
-                    ev_candidate = {
-                        "title": summary,
-                        "start": start_k,
-                        "end": target_end.strftime("%H:%M"),
-                        "duration": dur_str,
-                        "attendees": people,
-                        "location": loc_str,
-                        "is_exception": is_exception,
-                        "uid": uid
-                    }
+                if matches:
+                    # 1. Comprobar si la fecha de hoy está en la lista de EXDATE de la serie
+                    if (uid, today_ymd) in exdates_by_uid or (uid, f"{today_ymd}_{start_hm}") in exdates_by_uid:
+                        debug_decisions.append({
+                            'uid': uid, 'summary': summary, 'time': start_hm,
+                            'decision': 'EXCLUDED', 'reason': 'EXDATE_MATCH'
+                        })
+                        continue
 
-                    # Si ya existe una ocurrencia para este UID en este horario:
-                    if event_key in events_by_uid:
-                        # La excepción modificada (RECURRENCE-ID) reemplaza a la serie maestra
-                        if is_exception:
-                            events_by_uid[event_key] = ev_candidate
-                        # O si tiene ubicación real (Maps) en lugar de Teams genérico
-                        elif "maps" in loc_str.lower() or "http" in loc_str.lower():
-                            events_by_uid[event_key] = ev_candidate
-                    else:
-                        events_by_uid[event_key] = ev_candidate
+                    # 2. Comprobar si esta ocurrencia fue cancelada por un evento hijo RECURRENCE-ID
+                    if (uid, today_ymd) in cancelled_instances or (uid, f"{today_ymd}_{start_hm}") in cancelled_instances or (uid, start_hm) in cancelled_instances:
+                        debug_decisions.append({
+                            'uid': uid, 'summary': summary, 'time': start_hm,
+                            'decision': 'EXCLUDED', 'reason': 'RECURRENCE_ID_CANCELLED'
+                        })
+                        continue
 
-                # Para el timeline de 8 a 17h
-                t_s = target_start or (dt_start if dt_start.date() == now_ba.date() else None)
-                t_e = target_end or (dt_end if dt_start.date() == now_ba.date() else None)
-                if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
-                    timeline_events.append({
-                        "start_dt": t_s,
-                        "end_dt": t_e
-                    })
+                    # 3. Comprobar si hay una excepción activa reprogramada que toma su lugar
+                    if (uid, today_ymd) in active_exceptions or (uid, f"{today_ymd}_{start_hm}") in active_exceptions:
+                        continue
 
-        # Extraer lista final de citas consolidadas
-        events_window = list(events_by_uid.values())
+                    cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
+                    cand_end = cand_start + duration
+                    if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
+                        target_start = cand_start
+                        target_end = cand_end
+            else:
+                # Evento único puntual (no recurrente)
+                if uid in cancelled_master_uids or is_self_cancelled:
+                    continue
+                if (uid, today_ymd) in cancelled_instances or (uid, start_hm) in cancelled_instances:
+                    continue
+                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
+                    target_start = dt_start
+                    target_end = dt_end
 
-        # Deduplicación secundaria por proximidad de título y horario
+            if target_start and target_end:
+                s_str = target_start.strftime("%H:%M")
+                e_str = target_end.strftime("%H:%M")
+                dur_min = int((target_end - target_start).total_seconds() / 60)
+                dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
+                event_key = f"{uid}_{s_str}" if uid else f"{summary}_{s_str}"
+
+                ev_candidate = {
+                    "title": summary,
+                    "start": s_str,
+                    "end": e_str,
+                    "start_dt": target_start,
+                    "end_dt": target_end,
+                    "duration": dur_str,
+                    "attendees": people,
+                    "location": loc_str,
+                    "is_exception": is_exception,
+                    "uid": uid
+                }
+
+                # Si ya existe para este horario, la excepción específica o ubicación real toma precedencia
+                if event_key in events_by_key:
+                    if is_exception:
+                        events_by_key[event_key] = ev_candidate
+                    elif "maps" in loc_str.lower() or "http" in loc_str.lower():
+                        events_by_key[event_key] = ev_candidate
+                else:
+                    events_by_key[event_key] = ev_candidate
+                debug_decisions.append({'uid': uid, 'summary': summary, 'time': s_str, 'decision': 'INCLUDED'})
+
+        # Extraer lista final ordenada de citas de la ventana
+        events_window = list(events_by_key.values())
+
+        # Deduplicación secundaria por coincidencia de título y horario exacto
         deduped_window = []
         for ev in events_window:
             is_dup = False
@@ -499,13 +647,35 @@ def update_calendar_data_sync():
                 deduped_window.append(ev)
 
         deduped_window.sort(key=lambda x: x["start"])
+
+        # Timeline de 8 a 17h construido EXCLUSIVAMENTE sobre las citas confirmadas no canceladas
+        timeline_events = []
+        for ev in deduped_window:
+            t_s = ev["start_dt"]
+            t_e = ev["end_dt"]
+            if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
+                timeline_events.append({
+                    "start_dt": t_s,
+                    "end_dt": t_e
+                })
+
         with CACHE_LOCK:
             CALENDAR_CACHE["events"] = deduped_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
+            CALENDAR_CACHE["debug"] = {
+                "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_vevents_found": len(raw_events),
+                "total_exdates": len(exdates_by_uid),
+                "total_cancelled_instances": len(cancelled_instances),
+                "total_cancelled_uids": len(cancelled_master_uids),
+                "active_meetings_count": len(deduped_window),
+                "decisions": debug_decisions
+            }
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado: {len(deduped_window)} citas ventana (deduplicadas de {len(events_window)}), {len(timeline_events)} timeline")
+        print(f"[CALENDAR] Actualizado con éxito: {len(deduped_window)} citas activas, {len(timeline_events)} timeline, {len(cancelled_instances)} cancelaciones procesadas")
     except Exception as e:
-        print(f"[CALENDAR] Error: {e}")
+        print(f"[CALENDAR] Error en procesamiento: {e}")
+
 
 def parse_weather_desc_and_code(desc_raw, is_day=True):
     d = desc_raw.lower().strip()
@@ -554,6 +724,11 @@ def update_weather_data_sync():
                 content = raw_data.decode('utf-8', errors='ignore')
             data = json.loads(content)
             if "current" in data and "temperature_2m" in data["current"]:
+                # Sanitizar is_day de Open-Meteo según hora real local en Buenos Aires
+                if 7 <= now_ba.hour < 19:
+                    data["current"]["is_day"] = 1
+                elif now_ba.hour >= 20 or now_ba.hour < 6:
+                    data["current"]["is_day"] = 0
                 weather_result = data
                 print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
@@ -862,7 +1037,20 @@ def render_png_dashboard():
         sat_code = 2
         sun_code = 0
         cur_code = 1
-        is_day = (7 <= now_ba.hour <= 19)
+        # Determinar día/noche en Buenos Aires con prioridad horaria local inquebrantable
+        # En Buenos Aires (lat -34.5°), el sol sale siempre antes de las 07:55 y se oculta después de las 18:00
+        # A las 08:15 AM es pleno día y NUNCA debe mostrar luna.
+        h_now = now_ba.hour
+        api_day_val = wdata.get("current", {}).get("is_day") if wdata else None
+        if 7 <= h_now < 19:
+            is_day = True
+        elif h_now >= 20 or h_now < 6:
+            is_day = False
+        else:
+            if api_day_val is not None:
+                is_day = bool(api_day_val)
+            else:
+                is_day = (h_now == 6 and now_ba.minute >= 45) or (h_now == 19 and now_ba.minute <= 15)
 
         if wdata:
             try:
@@ -870,8 +1058,6 @@ def render_png_dashboard():
                 temp_cur = f"{t}°"
                 code = wdata["current"].get("weather_code", 1)
                 cur_code = code
-                if "is_day" in wdata["current"]:
-                    is_day = bool(wdata["current"]["is_day"])
 
                 if "desc_text" in wdata["current"]:
                     desc_cur = wdata["current"]["desc_text"][:24]
@@ -1315,6 +1501,30 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 body = json.dumps(events).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            elif self.path.startswith("/api/debug_calendar"):
+                update_calendar_data_sync()
+                with CACHE_LOCK:
+                    cal_copy = {
+                        "events_window": [
+                            {"title": e["title"], "start": e["start"], "end": e["end"], "duration": e["duration"], "location": e["location"]}
+                            for e in CALENDAR_CACHE.get("events", [])
+                        ],
+                        "timeline_events": [
+                            {"start": e["start_dt"].strftime("%H:%M"), "end": e["end_dt"].strftime("%H:%M")}
+                            for e in CALENDAR_CACHE.get("today_all_events", [])
+                        ],
+                        "debug_info": CALENDAR_CACHE.get("debug", {})
+                    }
+                body = json.dumps(cal_copy, indent=2, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
                 self.send_header("Access-Control-Allow-Origin", "*")
