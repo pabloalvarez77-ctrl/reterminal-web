@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Servidor Definitivo para reTerminal E1002 (Spectra 6)
-- Estación Meteorológica fija: Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con fallback a wttr.in/SABE
+- Estación Meteorológica fija: Aeroparque Jorge Newbery (SABE, -34.5586, -58.4164) con respaldo METAR oficial (aviationweather.gov)
 - Paleta estricta de los 6 colores primarios Spectra 6 (#FFFFFF, #000000, #D60000, #008833, #0044CC, #FFCC00)
 - Cálculo y visualización de ETA con Google Maps API:
   * Solo activo de Lunes a Viernes entre las 15:00 y las 19:00 hs (fuera de esa ventana no consume API y entran 6 citas)
@@ -363,7 +363,7 @@ def update_calendar_data_sync():
         with urllib.request.urlopen(req, timeout=25) as resp:
             raw_data = resp.read()
             encoding = resp.headers.get("Content-Encoding", "").lower()
-            if "gzip" in encoding or raw_data.startswith(b'\x1f\x8b'):
+            if "gzip" in encoding or raw_data.startswith(bytes([0x1f, 0x8b])):
                 content = gzip.decompress(raw_data).decode('utf-8', errors='ignore')
             else:
                 content = raw_data.decode('utf-8', errors='ignore')
@@ -698,33 +698,34 @@ def parse_weather_desc_and_code(desc_raw, is_day=True):
     return 3, desc_raw.title()
 
 def update_weather_data_sync():
-    """Consulta la estación oficial de Aeroparque Jorge Newbery (SABE) con soporte gzip y fallback en español"""
+    """Consulta la estación oficial de Aeroparque Jorge Newbery (SABE) con respaldo METAR oficial (aviationweather.gov)"""
     weather_result = None
     tz_ba = timezone(timedelta(hours=-3))
     now_ba = datetime.now(tz_ba)
     hour_now = now_ba.hour
-    is_day_now = 1 if (7 <= hour_now <= 19) else 0
+    is_day_now = 1 if (7 <= hour_now < 19) else 0
     debug_w = {
         "timestamp": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
+        "station": "Aeroparque Jorge Newbery (SABE)",
         "source_used": None,
         "open_meteo_status": None,
-        "wttr_status": None
+        "aviation_weather_status": None
     }
     
-    # 1. Open-Meteo Aeroparque (SABE) con soporte de descompresión gzip y 10 días de pronóstico
+    # 1. Open-Meteo Aeroparque (SABE) con User-Agent limpio, 12s timeout y 10 días de pronóstico
     try:
         url = f'https://api.open-meteo.com/v1/forecast?latitude={AEROPARQUE_LAT}&longitude={AEROPARQUE_LON}&current=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=America%2FArgentina%2FBuenos_Aires&forecast_days=10'
         req = urllib.request.Request(
             url,
             headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept-Encoding': 'gzip, deflate, identity'
+                'User-Agent': 'reTerminal-Dashboard/2.0 (pabloalvarez; Python/3.11)',
+                'Accept': 'application/json'
             }
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=12) as resp:
             raw_data = resp.read()
             encoding = resp.headers.get("Content-Encoding", "").lower()
-            if "gzip" in encoding or raw_data.startswith(b'\x1f\x8b'):
+            if "gzip" in encoding or raw_data.startswith(bytes([0x1f, 0x8b])):
                 content = gzip.decompress(raw_data).decode('utf-8', errors='ignore')
             else:
                 content = raw_data.decode('utf-8', errors='ignore')
@@ -739,79 +740,62 @@ def update_weather_data_sync():
                 weather_result = data
                 debug_w["source_used"] = "Open-Meteo (Aeroparque SABE)"
                 debug_w["open_meteo_raw_is_day"] = raw_api_is_day
-                debug_w["open_meteo_sanitized_is_day"] = data["current"]["is_day"]
                 debug_w["open_meteo_current_raw"] = data.get("current")
                 debug_w["open_meteo_status"] = "OK"
                 print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
         debug_w["open_meteo_status"] = f"Error: {e}"
-        print(f"[BG WORKER] Open-Meteo aviso: {e}. Probando respaldo METAR...")
+        print(f"[BG WORKER] Open-Meteo aviso: {e}. Probando respaldo METAR SABE...")
 
-    # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in en español
+    # 2. Respaldo directo: METAR oficial estación Aeroparque (SABE) vía aviationweather.gov
     if not weather_result:
         try:
-            url_fallback = 'https://wttr.in/SABE?format=j1&lang=es'
-            req_fb = urllib.request.Request(
-                url_fallback,
-                headers={'User-Agent': 'curl/7.88.1', 'Accept-Encoding': 'identity'}
+            url_aw = 'https://aviationweather.gov/api/data/metar?ids=SABE&format=json'
+            req_aw = urllib.request.Request(
+                url_aw,
+                headers={'User-Agent': 'reTerminal-Dashboard/2.0'}
             )
-            with urllib.request.urlopen(req_fb, timeout=8) as resp:
-                raw_fb = resp.read().decode('utf-8', errors='ignore')
-                data_fb = json.loads(raw_fb)
-                current_cond = data_fb["current_condition"][0]
-                temp_c = float(current_cond["temp_C"])
-                
-                raw_desc = ""
-                if "lang_es" in current_cond and current_cond["lang_es"]:
-                    raw_desc = current_cond["lang_es"][0]["value"]
-                elif "weatherDesc" in current_cond and current_cond["weatherDesc"]:
-                    raw_desc = current_cond["weatherDesc"][0]["value"]
-                    
-                code_mapped, desc_spanish = parse_weather_desc_and_code(raw_desc, is_day=bool(is_day_now))
-                
-                daily_forecast = data_fb.get("weather", [])
-                min_t = float(daily_forecast[0]["mintempC"]) if daily_forecast else temp_c - 4
-                max_t = float(daily_forecast[0]["maxtempC"]) if daily_forecast else temp_c + 3
-
-                daily_times = [(now_ba + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(10)]
-                daily_mins = [min_t] * 10
-                daily_maxs = [max_t] * 10
-                daily_codes = [code_mapped] * 10
-                
-                for i, day_f in enumerate(daily_forecast[:len(daily_times)]):
-                    try:
-                        daily_mins[i] = float(day_f.get("mintempC", min_t))
-                        daily_maxs[i] = float(day_f.get("maxtempC", max_t))
-                    except Exception:
-                        pass
-
-                weather_result = {
-                    "current": {
-                        "temperature_2m": temp_c,
-                        "weather_code": code_mapped,
-                        "is_day": is_day_now,
-                        "desc_text": desc_spanish
-                    },
-                    "daily": {
-                        "temperature_2m_min": daily_mins,
-                        "temperature_2m_max": daily_maxs,
-                        "weather_code": daily_codes,
-                        "time": daily_times
+            with urllib.request.urlopen(req_aw, timeout=10) as resp:
+                raw_aw = resp.read().decode('utf-8', errors='ignore')
+                data_aw = json.loads(raw_aw)
+                if isinstance(data_aw, list) and len(data_aw) > 0:
+                    metar_item = data_aw[0]
+                    temp_c = float(metar_item.get("temp", 15.0))
+                    cover = str(metar_item.get("cover", "CLR")).upper()
+                    code_mapped = 0 if cover in ("SKC", "CLR", "CAVOK") else (1 if cover == "FEW" else (2 if cover == "SCT" else 3))
+                    desc_text = "Despejado" if code_mapped in (0, 1) else ("Parcialmente nublado" if code_mapped == 2 else "Nublado")
+                    daily_times = [(now_ba + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(10)]
+                    weather_result = {
+                        "current": {
+                            "temperature_2m": temp_c,
+                            "weather_code": code_mapped,
+                            "is_day": is_day_now,
+                            "desc_text": desc_text
+                        },
+                        "daily": {
+                            "temperature_2m_min": [round(temp_c - 4)] * 10,
+                            "temperature_2m_max": [round(temp_c + 5)] * 10,
+                            "weather_code": [code_mapped] * 10,
+                            "time": daily_times
+                        }
                     }
-                }
-                print(f"[BG WORKER] Clima actualizado desde METAR Aeroparque: {temp_c}°C, {desc_spanish} (código {code_mapped})")
-        except Exception as err_fb:
-            print(f"[BG WORKER] Error en respaldo METAR Aeroparque: {err_fb}")
+                    debug_w["source_used"] = "METAR SABE (aviationweather.gov)"
+                    debug_w["aviation_weather_status"] = "OK"
+                    print(f"[BG WORKER] Clima actualizado desde METAR SABE (AviationWeather): {temp_c}°C")
+        except Exception as e_aw:
+            debug_w["aviation_weather_status"] = f"Error: {e_aw}"
+            print(f"[BG WORKER] AviationWeather aviso: {e_aw}.")
 
-    if weather_result:
-        with CACHE_LOCK:
+    # SIEMPRE registrar los detalles de depuración para que /api/debug_weather nunca esté vacío
+    with CACHE_LOCK:
+        if weather_result:
             old_w = WEATHER_CACHE.get("data")
             if old_w and "daily" in old_w and len(old_w["daily"].get("time", [])) >= 7:
                 if len(weather_result.get("daily", {}).get("time", [])) < 7:
                     weather_result["daily"] = old_w["daily"]
             WEATHER_CACHE["data"] = weather_result
-            WEATHER_CACHE["debug"] = debug_w
             WEATHER_CACHE["timestamp"] = time.time()
+        WEATHER_CACHE["debug"] = debug_w
 
 def update_traffic_eta_sync(now_ba, force_check=False):
     """
