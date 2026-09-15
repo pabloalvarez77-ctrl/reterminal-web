@@ -70,7 +70,7 @@ CACHE_LOCK = threading.Lock()
 INITIAL_READY = threading.Event()
 CALENDAR_CACHE = {"events": [], "today_all_events": [], "timestamp": 0}
 FINANCE_CACHE = {"data": [], "timestamp": 0}
-WEATHER_CACHE = {"data": None, "timestamp": 0}
+WEATHER_CACHE = {"data": None, "debug": {}, "timestamp": 0}
 TRAFFIC_CACHE = {"data": None, "debug": {}, "timestamp": 0}
 IMAGE_CACHE = {"bytes": None, "b64": "", "timestamp": 0}
 
@@ -704,6 +704,12 @@ def update_weather_data_sync():
     now_ba = datetime.now(tz_ba)
     hour_now = now_ba.hour
     is_day_now = 1 if (7 <= hour_now <= 19) else 0
+    debug_w = {
+        "timestamp": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
+        "source_used": None,
+        "open_meteo_status": None,
+        "wttr_status": None
+    }
     
     # 1. Open-Meteo Aeroparque (SABE) con soporte de descompresión gzip y 10 días de pronóstico
     try:
@@ -724,14 +730,21 @@ def update_weather_data_sync():
                 content = raw_data.decode('utf-8', errors='ignore')
             data = json.loads(content)
             if "current" in data and "temperature_2m" in data["current"]:
+                raw_api_is_day = data["current"].get("is_day")
                 # Sanitizar is_day de Open-Meteo según hora real local en Buenos Aires
                 if 7 <= now_ba.hour < 19:
                     data["current"]["is_day"] = 1
                 elif now_ba.hour >= 20 or now_ba.hour < 6:
                     data["current"]["is_day"] = 0
                 weather_result = data
+                debug_w["source_used"] = "Open-Meteo (Aeroparque SABE)"
+                debug_w["open_meteo_raw_is_day"] = raw_api_is_day
+                debug_w["open_meteo_sanitized_is_day"] = data["current"]["is_day"]
+                debug_w["open_meteo_current_raw"] = data.get("current")
+                debug_w["open_meteo_status"] = "OK"
                 print("[BG WORKER] Clima actualizado desde estación Aeroparque (Open-Meteo)")
     except Exception as e:
+        debug_w["open_meteo_status"] = f"Error: {e}"
         print(f"[BG WORKER] Open-Meteo aviso: {e}. Probando respaldo METAR...")
 
     # 2. Respaldo directo: Estación oficial METAR Aeroparque (SABE) vía wttr.in en español
@@ -797,6 +810,7 @@ def update_weather_data_sync():
                 if len(weather_result.get("daily", {}).get("time", [])) < 7:
                     weather_result["daily"] = old_w["daily"]
             WEATHER_CACHE["data"] = weather_result
+            WEATHER_CACHE["debug"] = debug_w
             WEATHER_CACHE["timestamp"] = time.time()
 
 def update_traffic_eta_sync(now_ba, force_check=False):
@@ -1501,6 +1515,81 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 body = json.dumps(events).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            elif self.path.startswith("/api/debug_weather"):
+                update_weather_data_sync()
+                tz_ba = timezone(timedelta(hours=-3))
+                now_ba = datetime.now(tz_ba)
+                with CACHE_LOCK:
+                    wdata = WEATHER_CACHE.get("data")
+                    wdebug = dict(WEATHER_CACHE.get("debug", {}))
+                
+                h_now = now_ba.hour
+                api_day_val = wdata.get("current", {}).get("is_day") if wdata else None
+                if 7 <= h_now < 19:
+                    is_day_calc = True
+                    is_day_rule = "7 <= hora < 19 (Pleno día en Buenos Aires)"
+                elif h_now >= 20 or h_now < 6:
+                    is_day_calc = False
+                    is_day_rule = "hora >= 20 o hora < 6 (Noche cerrada en Buenos Aires)"
+                else:
+                    if api_day_val is not None:
+                        is_day_calc = bool(api_day_val)
+                        is_day_rule = f"Transición crepuscular (usa flag API: {api_day_val})"
+                    else:
+                        is_day_calc = (h_now == 6 and now_ba.minute >= 45) or (h_now == 19 and now_ba.minute <= 15)
+                        is_day_rule = "Transición crepuscular (cálculo astronómico local)"
+
+                code_val = wdata.get("current", {}).get("weather_code", 1) if wdata else 1
+                if not is_day_calc and code_val in (0, 1):
+                    icon_name = "LUNA creciente (amarilla con cráter)"
+                elif code_val in (0, 1):
+                    icon_name = "SOL con rayos (amarillo)"
+                elif code_val == 2:
+                    icon_name = f"PARCIALMENTE NUBLADO ({'Sol' if is_day_calc else 'Luna'} detrás de nube)"
+                elif code_val == 3:
+                    icon_name = "NUBLADO (Nube blanca pura)"
+                elif code_val >= 95:
+                    icon_name = "TORMENTA (Nube con rayo amarillo)"
+                else:
+                    icon_name = "LLUVIA (Nube con gotas azules)"
+
+                desc_text_final = "Despejado" if is_day_calc else "Cielo claro"
+                if wdata and "desc_text" in wdata.get("current", {}):
+                    desc_text_final = wdata["current"]["desc_text"]
+                elif code_val == 2:
+                    desc_text_final = "Mayormente despejado" if is_day_calc else "Parcialmente nublado"
+                elif code_val == 3:
+                    desc_text_final = "Nublado"
+
+                weather_report = {
+                    "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
+                    "station": "Aeroparque Jorge Newbery (SABE, lat: -34.5586, lon: -58.4164)",
+                    "calculated_is_day": is_day_calc,
+                    "day_night_rule_applied": is_day_rule,
+                    "icon_drawn_on_screen": icon_name,
+                    "current_weather": {
+                        "temperature": f"{wdata.get('current', {}).get('temperature_2m')}°C" if wdata else "N/A",
+                        "weather_code": code_val,
+                        "desc_text": desc_text_final,
+                        "api_is_day_flag": api_day_val
+                    },
+                    "daily_forecast": {
+                        "temp_min_today": f"{wdata.get('daily', {}).get('temperature_2m_min', [None])[0]}°C" if wdata else "N/A",
+                        "temp_max_today": f"{wdata.get('daily', {}).get('temperature_2m_max', [None])[0]}°C" if wdata else "N/A",
+                        "forecast_days_available": len(wdata.get("daily", {}).get("time", [])) if wdata else 0
+                    },
+                    "debug_details": wdebug
+                }
+                body = json.dumps(weather_report, indent=2, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Connection", "close")
                 self.send_header("Access-Control-Allow-Origin", "*")
