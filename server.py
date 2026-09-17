@@ -52,14 +52,8 @@ TRAFFIC_DESTINATION = "Iberá 3544, C1430AVF, CABA"
 AEROPARQUE_LAT = "-34.5586"
 AEROPARQUE_LON = "-58.4164"
 
-# Exclusiones de reuniones canceladas y tiempo de concentración
+# Exclusiones de títulos solicitadas por el usuario
 EXCLUDED_TITLES = [
-    "proyecto 90k",
-    "graciela maestra pedro",
-    "recap global producto",
-    "cancelado",
-    "canceled",
-    "rechazado",
     "tiempo de concentración",
     "tiempo de concentracion",
     "focus time"
@@ -798,7 +792,7 @@ def update_weather_data_sync():
                     cover = str(metar_item.get("cover", "CLR")).upper()
                     code_mapped = 0 if cover in ("SKC", "CLR", "CAVOK") else (1 if cover == "FEW" else (2 if cover == "SCT" else 3))
                     desc_text = "Despejado" if code_mapped in (0, 1) else ("Parcialmente nublado" if code_mapped == 2 else "Nublado")
-                    daily_times = [(now_ba + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(10)]
+                    daily_times = [now_ba.strftime("%Y-%m-%d")]
                     weather_result = {
                         "current": {
                             "temperature_2m": temp_c,
@@ -807,9 +801,9 @@ def update_weather_data_sync():
                             "desc_text": desc_text
                         },
                         "daily": {
-                            "temperature_2m_min": [round(temp_c - 4)] * 10,
-                            "temperature_2m_max": [round(temp_c + 5)] * 10,
-                            "weather_code": [code_mapped] * 10,
+                            "temperature_2m_min": [round(temp_c - 4)],
+                            "temperature_2m_max": [round(temp_c + 5)],
+                            "weather_code": [code_mapped],
                             "time": daily_times
                         }
                     }
@@ -1066,8 +1060,8 @@ def render_png_dashboard():
         range_cur = "Mín: --° | Máx: --°"
         sat_temp = "--°/--°"
         sun_temp = "--°/--°"
-        sat_code = 2
-        sun_code = 0
+        sat_code = None
+        sun_code = None
         cur_code = 1
         # Determinar día/noche en Buenos Aires con prioridad horaria local inquebrantable
         # En Buenos Aires (lat -34.5°), el sol sale siempre antes de las 07:55 y se oculta después de las 18:00
@@ -1124,13 +1118,7 @@ def render_png_dashboard():
                             sun_temp = f"{round(wdata['daily']['temperature_2m_min'][i])}°/{round(wdata['daily']['temperature_2m_max'][i])}°"
                             sun_code = wdata["daily"]["weather_code"][i]
 
-                # Si las fechas no se encontraron en la respuesta de la API, asegurar valores representativos de Aeroparque
-                if sat_temp == "--°/--°":
-                    sat_temp = "11°/18°"
-                    sat_code = 1
-                if sun_temp == "--°/--°":
-                    sun_temp = "10°/19°"
-                    sun_code = 0
+# Sin valores de resguardo para fin de semana (mostrar guiones si no hay datos)
             except Exception:
                 pass
 
