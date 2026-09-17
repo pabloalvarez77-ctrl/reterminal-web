@@ -327,6 +327,64 @@ def extract_people_from_vevent(raw):
 
     return people
 
+def check_event_rejection_or_cancellation(raw_vevent):
+    """
+    Determina si un VEVENT de Office 365 / Outlook está cancelado, rechazado o NO aceptado por el usuario.
+    Retorna (is_excluded, reason)
+    """
+    status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z\-]+)', raw_vevent, re.IGNORECASE)
+    status = status_m.group(1).upper() if status_m else ''
+
+    busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw_vevent, re.IGNORECASE)
+    busystatus = busy_m.group(1).upper() if busy_m else ''
+
+    summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw_vevent, re.IGNORECASE)
+    summary = summary_m.group(1).strip() if summary_m else ''
+
+    # 1. Estados explícitos de cancelación
+    if status in ('CANCELLED', 'CANCELED'):
+        return True, f'STATUS:{status}'
+
+    # 2. X-MICROSOFT-CDO-BUSYSTATUS en Office 365 / Outlook:
+    # - FREE: Citas declinadas/canceladas o marcadas como tiempo libre
+    # - TENTATIVE: Citas recibidas que el usuario NO aceptó (o aceptó provisionalmente)
+    if busystatus == 'FREE':
+        return True, 'X-MICROSOFT-CDO-BUSYSTATUS:FREE'
+    if busystatus == 'TENTATIVE':
+        return True, 'X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE (No aceptada / Provisoria)'
+
+    # 3. Status RFC 5545: TENTATIVE o NEEDS-ACTION
+    if status in ('TENTATIVE', 'NEEDS-ACTION'):
+        return True, f'STATUS:{status} (No confirmada / Pendiente)'
+
+    # 4. Título excluido explícito
+    if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
+        return True, f'EXCLUDED_TITLE ({summary})'
+
+    # 5. Prefijo de cancelación en SUMMARY
+    if re.search(r'^(?:canceled|cancelado|cancelled|rechazado)[\s:]', summary, re.IGNORECASE):
+        return True, f'SUMMARY_CANCELED_PREFIX ({summary})'
+
+    # 6. Comprobar si Pablo es organizador
+    organizer_m = re.search(r'ORGANIZER[^\r\n]+', raw_vevent, re.IGNORECASE)
+    is_pablo_organizer = bool(organizer_m and any(p in organizer_m.group(0).lower() for p in ('pablo', 'palvarez', '4ebd49ac2ad843ee9cc8519536437d40')))
+
+    # Si Pablo NO es el organizador de la reunión, evaluar sus parámetros ATTENDEE
+    if not is_pablo_organizer:
+        attendee_lines = re.findall(r'ATTENDEE[^\r\n]+', raw_vevent, re.IGNORECASE)
+        for att in attendee_lines:
+            att_upper = att.upper()
+            is_user_att = any(p in att.lower() for p in ('pablo', 'palvarez', '4ebd49ac2ad843ee9cc8519536437d40')) or len(attendee_lines) == 1
+            if is_user_att:
+                if 'PARTSTAT=DECLINED' in att_upper or 'PARTSTAT:DECLINED' in att_upper:
+                    return True, 'ATTENDEE_PARTSTAT_DECLINED'
+                if 'PARTSTAT=NEEDS-ACTION' in att_upper or 'PARTSTAT:NEEDS-ACTION' in att_upper:
+                    return True, 'ATTENDEE_PARTSTAT_NEEDS-ACTION (No aceptada)'
+                if 'PARTSTAT=TENTATIVE' in att_upper or 'PARTSTAT:TENTATIVE' in att_upper:
+                    return True, 'ATTENDEE_PARTSTAT_TENTATIVE (No aceptada / Provisoria)'
+
+    return False, ''
+
 def update_calendar_data_sync():
     """
     Gestión 100% fiable y robusta de citas de Office 365 / Outlook (RFC 5545):
@@ -415,31 +473,8 @@ def update_calendar_data_sync():
                         except Exception:
                             pass
 
-            # Evaluación exhaustiva de cancelación para este bloque VEVENT
-            is_cancelled = False
-            cancel_reason = ''
-
-            if status in ('CANCELLED', 'CANCELED'):
-                is_cancelled = True
-                cancel_reason = f'STATUS:{status}'
-            elif busystatus == 'FREE':
-                # En Office 365, reuniones canceladas por el organizador o declinadas quedan en FREE
-                is_cancelled = True
-                cancel_reason = 'X-MICROSOFT-CDO-BUSYSTATUS:FREE'
-            elif any(ex in summary.lower() for ex in EXCLUDED_TITLES):
-                is_cancelled = True
-                cancel_reason = f'EXCLUDED_TITLE ({summary})'
-            elif re.search(r'^(?:canceled|cancelado|cancelled|rechazado)[\s:]', summary, re.IGNORECASE):
-                is_cancelled = True
-                cancel_reason = f'SUMMARY_CANCELED_PREFIX ({summary})'
-            else:
-                # Comprobar si el usuario rechazó la invitación
-                for att_line in re.findall(r'ATTENDEE[^\r\n]+', raw, re.IGNORECASE):
-                    if 'PARTSTAT=DECLINED' in att_line.upper() or 'PARTSTAT:DECLINED' in att_line.upper():
-                        if 'pablo' in att_line.lower() or 'bitali' in att_line.lower() or len(re.findall(r'ATTENDEE[^\r\n]+', raw, re.IGNORECASE)) == 1:
-                            is_cancelled = True
-                            cancel_reason = 'ATTENDEE_PARTSTAT_DECLINED'
-                            break
+            # Evaluación exhaustiva de cancelación y no aceptación para este bloque VEVENT
+            is_cancelled, cancel_reason = check_event_rejection_or_cancellation(raw)
 
             if rec_id_str:
                 rec_dt = parse_ical_dt(rec_id_str, tz_ba)
@@ -513,27 +548,26 @@ def update_calendar_data_sync():
             duration = dt_end - dt_start
             start_hm = dt_start.strftime('%H:%M')
 
-            is_self_cancelled = (
-                status in ('CANCELLED', 'CANCELED') or
-                busystatus == 'FREE' or
-                any(ex in summary.lower() for ex in EXCLUDED_TITLES) or
-                re.search(r'^(?:canceled|cancelado|cancelled|rechazado)[\s:]', summary, re.IGNORECASE)
-            )
+            is_self_cancelled, cancel_reason = check_event_rejection_or_cancellation(raw)
+            if is_self_cancelled:
+                debug_decisions.append({
+                    'uid': uid, 'summary': summary,
+                    'decision': 'EXCLUDED_UNACCEPTED_OR_CANCELLED', 'reason': cancel_reason
+                })
+                continue
 
             target_start = None
             target_end = None
             is_exception = bool(rec_id_str)
 
             if is_exception:
-                # Es una excepción de recurrencia (instancia modificada)
-                if is_self_cancelled:
-                    continue
+                # Es una excepción de recurrencia (instancia modificada confirmada)
                 if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
                     target_start = dt_start
                     target_end = dt_end
             elif rrule_m:
                 # Es una serie maestra recurrente
-                if uid in cancelled_master_uids or is_self_cancelled:
+                if uid in cancelled_master_uids:
                     continue
                 rrule_str = rrule_m.group(1).upper()
 
