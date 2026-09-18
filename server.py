@@ -27,6 +27,7 @@ import threading
 import math
 import io
 import base64
+import calendar
 from datetime import datetime, timedelta, timezone
 from PIL import Image, ImageDraw, ImageFont
 
@@ -379,6 +380,165 @@ def check_event_rejection_or_cancellation(raw_vevent):
 
     return False, ''
 
+def check_rrule_matches_today(rrule_str, dt_start, now_ba):
+    """
+    Evalúa de forma exhaustiva y robusta si una regla RRULE de RFC 5545 / Office 365
+    genera una ocurrencia para la fecha de hoy (now_ba.date()).
+    Soporta: DAILY (con INTERVAL y COUNT), WEEKLY (con INTERVAL y BYDAY),
+    MONTHLY (por día o posición ordinal ej. 3FR) y YEARLY.
+    Retorna (matches_today, reason_skipped)
+    """
+    today_date = now_ba.date()
+    start_date = dt_start.date()
+
+    if today_date < start_date:
+        return False, "START_DATE_IN_FUTURE"
+
+    rrule_upper = rrule_str.upper()
+
+    # 1. Comprobar UNTIL
+    until_m = re.search(r'UNTIL=([0-9TZ]+)', rrule_upper)
+    if until_m:
+        until_dt = parse_ical_dt(until_m.group(1), now_ba.tzinfo)
+        if until_dt and today_date > until_dt.date():
+            return False, "SKIPPED_BY_RRULE_UNTIL"
+
+    # 2. Parámetros clave
+    freq_m = re.search(r'FREQ=([A-Z]+)', rrule_upper)
+    freq = freq_m.group(1) if freq_m else "DAILY"
+
+    interval_m = re.search(r'INTERVAL=(\d+)', rrule_upper)
+    interval = int(interval_m.group(1)) if interval_m else 1
+    if interval <= 0:
+        interval = 1
+
+    count_m = re.search(r'COUNT=(\d+)', rrule_upper)
+    count = int(count_m.group(1)) if count_m else None
+
+    weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
+    today_code = weekday_map[today_date.weekday()]
+
+    if freq == "DAILY":
+        days_diff = (today_date - start_date).days
+        if days_diff % interval != 0:
+            return False, "DAILY_INTERVAL_MISMATCH"
+        if count is not None:
+            occurrence_idx = days_diff // interval
+            if occurrence_idx >= count:
+                return False, "COUNT_EXCEEDED"
+        return True, ""
+
+    elif freq == "WEEKLY":
+        start_monday = start_date - timedelta(days=start_date.weekday())
+        today_monday = today_date - timedelta(days=today_date.weekday())
+        weeks_diff = (today_monday - start_monday).days // 7
+        if weeks_diff % interval != 0:
+            return False, "WEEKLY_INTERVAL_MISMATCH"
+
+        byday_m = re.search(r'BYDAY=([A-Z,]+)', rrule_upper)
+        if byday_m:
+            bydays = [d.strip() for d in byday_m.group(1).split(",")]
+            if today_code not in bydays:
+                return False, "WEEKLY_BYDAY_MISMATCH"
+        else:
+            if dt_start.weekday() != today_date.weekday():
+                return False, "WEEKLY_DAY_MISMATCH"
+
+        if count is not None:
+            occurrence_idx = weeks_diff // interval
+            if occurrence_idx >= count:
+                return False, "COUNT_EXCEEDED"
+        return True, ""
+
+    elif freq == "MONTHLY":
+        months_diff = (today_date.year - start_date.year) * 12 + (today_date.month - start_date.month)
+        if months_diff < 0 or (months_diff % interval != 0):
+            return False, "MONTHLY_INTERVAL_MISMATCH"
+
+        byday_m = re.search(r'BYDAY=([0-9\-]*)([A-Z]{2})', rrule_upper)
+        setpos_m = re.search(r'BYSETPOS=([\-0-9]+)', rrule_upper)
+
+        if byday_m:
+            ordinal_str = byday_m.group(1)
+            day_code = byday_m.group(2)
+            if day_code != today_code:
+                return False, "MONTHLY_BYDAY_MISMATCH"
+
+            ordinal = int(ordinal_str) if ordinal_str else (int(setpos_m.group(1)) if setpos_m else None)
+            if ordinal is not None:
+                cal = calendar.monthcalendar(today_date.year, today_date.month)
+                days_in_month = [w[today_date.weekday()] for w in cal if w[today_date.weekday()] != 0]
+                if ordinal > 0 and ordinal <= len(days_in_month):
+                    if days_in_month[ordinal - 1] != today_date.day:
+                        return False, "MONTHLY_ORDINAL_MISMATCH"
+                elif ordinal < 0 and abs(ordinal) <= len(days_in_month):
+                    if days_in_month[ordinal] != today_date.day:
+                        return False, "MONTHLY_ORDINAL_MISMATCH"
+                else:
+                    return False, "MONTHLY_ORDINAL_OUT_OF_RANGE"
+            else:
+                if dt_start.weekday() != today_date.weekday():
+                    return False, "MONTHLY_WEEKDAY_MISMATCH"
+        else:
+            bymonthday_m = re.search(r'BYMONTHDAY=([0-9,]+)', rrule_upper)
+            if bymonthday_m:
+                valid_days = [int(d.strip()) for d in bymonthday_m.group(1).split(",")]
+                if today_date.day not in valid_days:
+                    return False, "MONTHLY_BYMONTHDAY_MISMATCH"
+            else:
+                if today_date.day != start_date.day:
+                    return False, "MONTHLY_DAY_MISMATCH"
+
+        if count is not None:
+            occurrence_idx = months_diff // interval
+            if occurrence_idx >= count:
+                return False, "COUNT_EXCEEDED"
+        return True, ""
+
+    elif freq == "YEARLY":
+        years_diff = today_date.year - start_date.year
+        if years_diff < 0 or (years_diff % interval != 0):
+            return False, "YEARLY_INTERVAL_MISMATCH"
+
+        bymonth_m = re.search(r'BYMONTH=([0-9]+)', rrule_upper)
+        target_month = int(bymonth_m.group(1)) if bymonth_m else start_date.month
+        if today_date.month != target_month:
+            return False, "YEARLY_MONTH_MISMATCH"
+
+        byday_m = re.search(r'BYDAY=([0-9\-]*)([A-Z]{2})', rrule_upper)
+        setpos_m = re.search(r'BYSETPOS=([\-0-9]+)', rrule_upper)
+        if byday_m:
+            ordinal_str = byday_m.group(1)
+            day_code = byday_m.group(2)
+            if day_code != today_code:
+                return False, "YEARLY_BYDAY_MISMATCH"
+            ordinal = int(ordinal_str) if ordinal_str else (int(setpos_m.group(1)) if setpos_m else None)
+            if ordinal is not None:
+                cal = calendar.monthcalendar(today_date.year, today_date.month)
+                days_in_month = [w[today_date.weekday()] for w in cal if w[today_date.weekday()] != 0]
+                if ordinal > 0 and ordinal <= len(days_in_month):
+                    if days_in_month[ordinal - 1] != today_date.day:
+                        return False, "YEARLY_ORDINAL_MISMATCH"
+                elif ordinal < 0 and abs(ordinal) <= len(days_in_month):
+                    if days_in_month[ordinal] != today_date.day:
+                        return False, "YEARLY_ORDINAL_MISMATCH"
+            else:
+                if dt_start.weekday() != today_date.weekday():
+                    return False, "YEARLY_WEEKDAY_MISMATCH"
+        else:
+            bymonthday_m = re.search(r'BYMONTHDAY=([0-9,]+)', rrule_upper)
+            target_day = int(bymonthday_m.group(1)) if bymonthday_m else start_date.day
+            if today_date.day != target_day:
+                return False, "YEARLY_DAY_MISMATCH"
+
+        if count is not None:
+            occurrence_idx = years_diff // interval
+            if occurrence_idx >= count:
+                return False, "COUNT_EXCEEDED"
+        return True, ""
+
+    return False, "UNKNOWN_FREQ"
+
 def update_calendar_data_sync():
     """
     Gestión 100% fiable y robusta de citas de Office 365 / Outlook (RFC 5545):
@@ -565,25 +725,11 @@ def update_calendar_data_sync():
                     continue
                 rrule_str = rrule_m.group(1).upper()
 
-                # Comprobar UNTIL (si la serie ya finalizó)
-                until_m = re.search(r'UNTIL=([0-9TZ]+)', rrule_str)
-                if until_m:
-                    until_dt = parse_ical_dt(until_m.group(1), tz_ba)
-                    if until_dt and now_ba.date() > until_dt.date():
-                        debug_decisions.append({'uid': uid, 'summary': summary, 'decision': 'SKIPPED_BY_RRULE_UNTIL'})
-                        continue
-
-                # Comprobar coincidencia con el día de hoy
-                matches = False
-                if 'FREQ=DAILY' in rrule_str:
-                    matches = True
-                elif 'FREQ=WEEKLY' in rrule_str:
-                    if 'BYDAY=' in rrule_str:
-                        bydays_m = re.search(r'BYDAY=([A-Z,]+)', rrule_str)
-                        if bydays_m and today_code in bydays_m.group(1).split(','):
-                            matches = True
-                    elif dt_start.weekday() == now_ba.weekday():
-                        matches = True
+                matches, skip_reason = check_rrule_matches_today(rrule_str, dt_start, now_ba)
+                if not matches:
+                    if "UNTIL" in skip_reason or "COUNT" in skip_reason:
+                        debug_decisions.append({'uid': uid, 'summary': summary, 'decision': 'SKIPPED_BY_RRULE_EXPIRATION', 'reason': skip_reason})
+                    continue
 
                 if matches:
                     # 1. Comprobar si la fecha de hoy está en la lista de EXDATE de la serie
