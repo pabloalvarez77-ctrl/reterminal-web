@@ -92,8 +92,38 @@ def is_traffic_window(dt):
     is_in_hours = (15 <= dt.hour < 19) or (dt.hour == 19 and dt.minute == 0)
     return is_weekday and is_in_hours
 
+def draw_cloud_shape(draw, cx, cy, r=10, fill_color="#FFFFFF", outline_color="#000000", ow=2):
+    """
+    Dibuja una nube estilizada de 3 lóbulos suaves con base plana redondeada,
+    contorno negro nítido y relleno blanco puro (sin costuras ni líneas internas).
+    """
+    scale = r / 10.0
+    ow_val = max(1, ow)
+    lx, ly, lr = cx - int(6.0 * scale), cy + int(1.0 * scale), int(5.0 * scale)
+    mx, my, mr = cx - int(0.5 * scale), cy - int(2.5 * scale), int(7.0 * scale)
+    rx, ry, rr = cx + int(6.0 * scale), cy + int(1.5 * scale), int(4.5 * scale)
+    
+    by_bot = cy + int(6.0 * scale)
+    by_top = cy
+    bx_left = lx - lr
+    bx_right = rx + rr
+    rad_base = max(int(2.5 * scale), 2)
+    
+    # 1. Silueta externa negra (outline)
+    draw.ellipse([lx - lr, ly - lr, lx + lr, ly + lr], fill=outline_color)
+    draw.ellipse([mx - mr, my - mr, mx + mr, my + mr], fill=outline_color)
+    draw.ellipse([rx - rr, ry - rr, rx + rr, ry + rr], fill=outline_color)
+    draw.rounded_rectangle([bx_left, by_top, bx_right, by_bot], radius=rad_base, fill=outline_color)
+    
+    # 2. Relleno interno blanco puro sin artefactos
+    draw.ellipse([lx - lr + ow_val, ly - lr + ow_val, lx + lr - ow_val, ly + lr - ow_val], fill=fill_color)
+    draw.ellipse([mx - mr + ow_val, my - mr + ow_val, mx + mr - ow_val, my + mr - ow_val], fill=fill_color)
+    draw.ellipse([rx - rr + ow_val, ry - rr + ow_val, rx + rr - ow_val, ry + rr - ow_val], fill=fill_color)
+    draw.rounded_rectangle([bx_left + ow_val, by_top + ow_val, bx_right - ow_val, by_bot - ow_val], radius=max(rad_base - ow_val, 1), fill=fill_color)
+    draw.rectangle([lx + ow_val, by_top, rx - ow_val, by_bot - ow_val], fill=fill_color)
+
 def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
-    """Paleta pura Spectra 6"""
+    """Paleta pura Spectra 6 con nube estilizada vectorial de alta visibilidad"""
     if not is_day and code in (0, 1): # Luna
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
         draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
@@ -109,22 +139,34 @@ def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
             y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
             draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
     elif code == 2: # Parcialmente nublado (sol/luna detrás de nube)
-        draw.ellipse([cx - r + 3, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFCC00", outline="#000000", width=1)
-        draw.rounded_rectangle([cx - r - 2, cy, cx + r + 2, cy + r + 1], radius=3, fill="#FFFFFF", outline="#000000", width=1)
-        draw.ellipse([cx - r + 1, cy - r + 2, cx + 1, cy + 3], fill="#FFFFFF", outline="#000000", width=1)
-    elif code == 3: # Cubierto / Nublado (SOLO NUBE BLANCA, SIN LLUVIA NI SOL)
-        draw.rounded_rectangle([cx - r - 2, cy - r + 3, cx + r + 2, cy + r], radius=3, fill="#FFFFFF", outline="#000000", width=1)
-        draw.ellipse([cx - r, cy - r + 1, cx + 1, cy + r - 1], fill="#FFFFFF", outline="#000000", width=1)
-        draw.ellipse([cx - 1, cy - r - 1, cx + r, cy + r - 1], fill="#FFFFFF", outline="#000000", width=1)
-        draw.rectangle([cx - r + 1, cy - r + 3, cx + r - 1, cy + r - 1], fill="#FFFFFF")
+        sun_r = int(r * 0.7)
+        sun_cx, sun_cy = cx - int(r * 0.35), cy - int(r * 0.35)
+        draw.ellipse([sun_cx - sun_r, sun_cy - sun_r, sun_cx + sun_r, sun_cy + sun_r], fill="#FFCC00", outline="#000000", width=1)
+        if r > 7:
+            for angle in [-math.pi/2, -3*math.pi/4, -math.pi, -math.pi/4]:
+                x1 = sun_cx + (sun_r + 2) * math.cos(angle)
+                y1 = sun_cy + (sun_r + 2) * math.sin(angle)
+                x2 = sun_cx + (sun_r + 4) * math.cos(angle)
+                y2 = sun_cy + (sun_r + 4) * math.sin(angle)
+                draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=1)
+        draw_cloud_shape(draw, cx + int(r * 0.2), cy + int(r * 0.2), r=int(r * 0.85), ow=1)
+    elif code == 3: # Cubierto / Nublado (Nube blanca suave y limpia)
+        ow = 2 if r >= 9 else 1
+        draw_cloud_shape(draw, cx, cy, r=r, ow=ow)
     elif code >= 95: # Tormenta
-        draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
-        draw.polygon([(cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6), (cx + 4, cy + 6), (cx - 3, cy + 12), (cx - 1, cy + 7), (cx - 4, cy + 7)], fill="#FFCC00", outline="#000000")
+        ow = 2 if r >= 9 else 1
+        draw_cloud_shape(draw, cx, cy - 3, r=int(r * 0.9), ow=ow)
+        draw.polygon([
+            (cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6),
+            (cx + 4, cy + 6), (cx - 3, cy + 13), (cx - 1, cy + 7), (cx - 4, cy + 7)
+        ], fill="#FFCC00", outline="#000000")
     else: # Lluvia
-        draw.rounded_rectangle([cx - r - 2, cy - r + 1, cx + r + 2, cy + 2], radius=3, fill="#FFFFFF", outline="#000000", width=1)
-        draw.line([cx - 4, cy + 4, cx - 6, cy + 9], fill="#0044CC", width=1)
-        draw.line([cx + 1, cy + 4, cx - 1, cy + 9], fill="#0044CC", width=1)
-        draw.line([cx + 6, cy + 4, cx + 4, cy + 9], fill="#0044CC", width=1)
+        ow = 2 if r >= 9 else 1
+        draw_cloud_shape(draw, cx, cy - 3, r=int(r * 0.9), ow=ow)
+        drop_len = 5 if r > 7 else 3
+        draw.line([cx - 4, cy + 4, cx - 6, cy + 4 + drop_len], fill="#0044CC", width=1)
+        draw.line([cx + 1, cy + 4, cx - 1, cy + 4 + drop_len], fill="#0044CC", width=1)
+        draw.line([cx + 6, cy + 4, cx + 4, cy + 4 + drop_len], fill="#0044CC", width=1)
 
 def draw_ford_bronco(draw, x, y, body_color="#008833"):
     """Dibuja la silueta todoterreno de una Ford Bronco Sport (28x16 px)"""
