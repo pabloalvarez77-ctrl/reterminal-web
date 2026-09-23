@@ -685,9 +685,10 @@ def update_calendar_data_sync():
                     })
 
         # =========================================================================
-        # PASADA 2: GENERACIÓN Y FILTRADO EXACTO DE CITAS PARA HOY
+        # PASADA 2: GENERACIÓN Y FILTRADO EXACTO DE CITAS PARA HOY Y TIMELINE
         # =========================================================================
-        events_by_key = {}
+        events_by_key = {}          # Citas vigentes/próximas para las tarjetas
+        timeline_by_key = {}        # Mapa de ocupación 8-17h de todo el día para la barra de estado
 
         for raw in raw_events:
             uid_m = re.search(r'UID:(.*?)\r?\n', raw, re.IGNORECASE)
@@ -740,7 +741,7 @@ def update_calendar_data_sync():
 
             if is_exception:
                 # Es una excepción de recurrencia (instancia modificada confirmada)
-                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
+                if dt_start.date() == now_ba.date():
                     target_start = dt_start
                     target_end = dt_end
             elif rrule_m:
@@ -778,19 +779,19 @@ def update_calendar_data_sync():
 
                     cand_start = now_ba.replace(hour=dt_start.hour, minute=dt_start.minute, second=0, microsecond=0)
                     cand_end = cand_start + duration
-                    if cand_end >= (now_ba - timedelta(minutes=45)) and cand_start <= window_end_ba:
-                        target_start = cand_start
-                        target_end = cand_end
+                    target_start = cand_start
+                    target_end = cand_end
             else:
                 # Evento único puntual (no recurrente)
                 if uid in cancelled_master_uids or is_self_cancelled:
                     continue
                 if (uid, today_ymd) in cancelled_instances or (uid, start_hm) in cancelled_instances:
                     continue
-                if dt_end >= (now_ba - timedelta(minutes=45)) and dt_start <= window_end_ba:
+                if dt_start.date() == now_ba.date():
                     target_start = dt_start
                     target_end = dt_end
 
+            # Si el evento corresponde al día de hoy, procesar tanto la barra de estado como las tarjetas
             if target_start and target_end:
                 s_str = target_start.strftime("%H:%M")
                 e_str = target_end.strftime("%H:%M")
@@ -813,30 +814,36 @@ def update_calendar_data_sync():
                     "uid": uid
                 }
 
-                # Si ya existe para este UID/horario, la excepción específica de la serie toma precedencia
-                if event_key in events_by_key:
-                    if is_exception:
-                        events_by_key[event_key] = ev_candidate
-                    elif "maps" in loc_str.lower() or "http" in loc_str.lower():
-                        events_by_key[event_key] = ev_candidate
-                else:
-                    events_by_key[event_key] = ev_candidate
-                debug_decisions.append({'uid': uid, 'summary': summary, 'time': s_str, 'decision': 'INCLUDED'})
+                # 1. BARRA DE ESTADO (Timeline 8-17h de todo el día):
+                # Incluye cualquier cita confirmada que intersecte la jornada laboral (8 a 17 hs),
+                # sin borrar las que ya ocurrieron antes de la hora actual.
+                is_allday = (dur_min >= 720) or ("X-MICROSOFT-CDO-ALLDAYEVENT:TRUE" in raw.upper())
+                if not is_allday and target_end > day_start_ba and target_start < day_end_ba:
+                    if event_key in timeline_by_key:
+                        if is_exception:
+                            timeline_by_key[event_key] = ev_candidate
+                    else:
+                        timeline_by_key[event_key] = ev_candidate
 
-        # Extraer lista final ordenada de citas de la ventana (estrictamente por horario e identidad)
+                # 2. TARJETAS DE PRÓXIMAS CITAS (Ventana dinámica):
+                # Solo muestra las citas que terminen después de (now - 45 min) y empiecen antes de (now + 8h)
+                if target_end >= (now_ba - timedelta(minutes=45)) and target_start <= window_end_ba:
+                    if event_key in events_by_key:
+                        if is_exception:
+                            events_by_key[event_key] = ev_candidate
+                        elif "maps" in loc_str.lower() or "http" in loc_str.lower():
+                            events_by_key[event_key] = ev_candidate
+                    else:
+                        events_by_key[event_key] = ev_candidate
+                    debug_decisions.append({'uid': uid, 'summary': summary, 'time': s_str, 'decision': 'INCLUDED'})
+
+        # Extraer lista final ordenada de citas de la ventana para las tarjetas
         events_window = list(events_by_key.values())
         events_window.sort(key=lambda x: (x["start"], x["title"]))
 
-        # Timeline de 8 a 17h construido EXCLUSIVAMENTE sobre las citas confirmadas no canceladas
-        timeline_events = []
-        for ev in events_window:
-            t_s = ev["start_dt"]
-            t_e = ev["end_dt"]
-            if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
-                timeline_events.append({
-                    "start_dt": t_s,
-                    "end_dt": t_e
-                })
+        # Extraer lista final de citas para el timeline completo de 8 a 17h
+        timeline_events = list(timeline_by_key.values())
+        timeline_events.sort(key=lambda x: x["start_dt"])
 
         with CACHE_LOCK:
             CALENDAR_CACHE["events"] = events_window
@@ -848,10 +855,11 @@ def update_calendar_data_sync():
                 "total_cancelled_instances": len(cancelled_instances),
                 "total_cancelled_uids": len(cancelled_master_uids),
                 "active_meetings_count": len(events_window),
+                "timeline_meetings_count": len(timeline_events),
                 "decisions": debug_decisions
             }
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado con éxito: {len(events_window)} citas activas, {len(timeline_events)} timeline, {len(cancelled_instances)} cancelaciones procesadas")
+        print(f"[CALENDAR] Actualizado con éxito: {len(events_window)} citas activas, {len(timeline_events)} timeline (día completo), {len(cancelled_instances)} cancelaciones procesadas")
     except Exception as e:
         print(f"[CALENDAR] Error en procesamiento: {e}")
 
