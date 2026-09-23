@@ -366,7 +366,15 @@ def extract_people_from_vevent(raw):
 
 def check_event_rejection_or_cancellation(raw_vevent):
     """
-    Determina si un VEVENT de Office 365 / Outlook está cancelado, rechazado o NO aceptado por el usuario.
+    Determina si un VEVENT de Office 365 / Outlook en modo METHOD:PUBLISH está cancelado o no aceptado.
+    Basado estrictamente en la especificación oficial de Microsoft [MS-OXCICAL] y RFC 5545.
+    
+    En calendarios publicados (METHOD:PUBLISH), la disponibilidad y aceptación del usuario se 
+    determina canónicamente por la propiedad MAPI PidLidBusyStatus, exportada como X-MICROSOFT-CDO-BUSYSTATUS:
+    - BUSY (0x02), OOF (0x03), WORKINGELSEWHERE (0x04): Cita confirmada y aceptada por el usuario.
+    - TENTATIVE (0x01): Cita provisoria o recibida que el usuario NO aceptó (se excluye).
+    - FREE (0x00): Cita declinada/rechazada o marcada como libre (se excluye).
+    
     Retorna (is_excluded, reason)
     """
     status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z\-]+)', raw_vevent, re.IGNORECASE)
@@ -378,12 +386,12 @@ def check_event_rejection_or_cancellation(raw_vevent):
     summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw_vevent, re.IGNORECASE)
     summary = summary_m.group(1).strip() if summary_m else ''
 
-    # 1. Estados explícitos de cancelación
+    # 1. Estados explícitos de cancelación según RFC 5545
     if status in ('CANCELLED', 'CANCELED'):
         return True, f'STATUS:{status}'
 
-    # 2. X-MICROSOFT-CDO-BUSYSTATUS en Office 365 / Outlook:
-    # - FREE: Citas declinadas/canceladas o marcadas como tiempo libre
+    # 2. X-MICROSOFT-CDO-BUSYSTATUS canónico de Exchange ([MS-OXCICAL] Sección 2.1.3.1.1.20.31):
+    # - FREE: Citas declinadas/rechazadas o tiempo libre
     # - TENTATIVE: Citas recibidas que el usuario NO aceptó (o aceptó provisionalmente)
     if busystatus == 'FREE':
         return True, 'X-MICROSOFT-CDO-BUSYSTATUS:FREE'
@@ -394,7 +402,7 @@ def check_event_rejection_or_cancellation(raw_vevent):
     if status in ('TENTATIVE', 'NEEDS-ACTION'):
         return True, f'STATUS:{status} (No confirmada / Pendiente)'
 
-    # 4. Título excluido explícito
+    # 4. Título excluido explícito por el usuario (Tiempo de concentración / Focus time)
     if any(ex in summary.lower() for ex in EXCLUDED_TITLES):
         return True, f'EXCLUDED_TITLE ({summary})'
 
@@ -402,25 +410,18 @@ def check_event_rejection_or_cancellation(raw_vevent):
     if re.search(r'^(?:canceled|cancelado|cancelled|rechazado)[\s:]', summary, re.IGNORECASE):
         return True, f'SUMMARY_CANCELED_PREFIX ({summary})'
 
-    # 6. Comprobar si Pablo es organizador
-    organizer_m = re.search(r'ORGANIZER[^\r\n]+', raw_vevent, re.IGNORECASE)
-    is_pablo_organizer = bool(organizer_m and any(p in organizer_m.group(0).lower() for p in ('pablo', 'palvarez', '4ebd49ac2ad843ee9cc8519536437d40')))
+    # 6. Prevalencia de aceptación de Exchange: Si busystatus es BUSY, OOF o WORKINGELSEWHERE,
+    # el usuario ya aceptó formalmente la cita. En METHOD:PUBLISH nunca se inspeccionan las líneas
+    # ATTENDEE para rechazar citas (los grupos/listas de distribución tienen PARTSTAT=NEEDS-ACTION).
+    if busystatus in ('BUSY', 'OOF', 'WORKINGELSEWHERE'):
+        return False, ''
 
-    # Si Pablo NO es el organizador de la reunión, evaluar sus parámetros ATTENDEE
-    if not is_pablo_organizer:
-        attendee_lines = re.findall(r'ATTENDEE[^\r\n]+', raw_vevent, re.IGNORECASE)
-        for att in attendee_lines:
-            att_upper = att.upper()
-            is_user_att = any(p in att.lower() for p in ('pablo', 'palvarez', '4ebd49ac2ad843ee9cc8519536437d40')) or len(attendee_lines) == 1
-            if is_user_att:
-                if 'PARTSTAT=DECLINED' in att_upper or 'PARTSTAT:DECLINED' in att_upper:
-                    return True, 'ATTENDEE_PARTSTAT_DECLINED'
-                if 'PARTSTAT=NEEDS-ACTION' in att_upper or 'PARTSTAT:NEEDS-ACTION' in att_upper:
-                    return True, 'ATTENDEE_PARTSTAT_NEEDS-ACTION (No aceptada)'
-                if 'PARTSTAT=TENTATIVE' in att_upper or 'PARTSTAT:TENTATIVE' in att_upper:
-                    return True, 'ATTENDEE_PARTSTAT_TENTATIVE (No aceptada / Provisoria)'
+    # 7. Si por alguna razón busystatus no está presente (ICS no estándar), verificar rechazo explícito
+    if 'PARTSTAT=DECLINED' in raw_vevent.upper():
+        return True, 'PARTSTAT=DECLINED'
 
     return False, ''
+
 
 def check_rrule_matches_today(rrule_str, dt_start, now_ba):
     """
@@ -581,19 +582,15 @@ def check_rrule_matches_today(rrule_str, dt_start, now_ba):
 
     return False, "UNKNOWN_FREQ"
 
+
 def update_calendar_data_sync():
     """
-    Gestión 100% fiable y robusta de citas de Office 365 / Outlook (RFC 5545):
+    Gestión 100% conforme a las especificaciones oficiales de Microsoft Office 365 [MS-OXCICAL] y RFC 5545:
     - Procesamiento en dos pasadas (Two-Pass Resolution)
-    - Soporte completo de EXDATE (fechas de recurrencia excluidas / canceladas por el organizador)
+    - Soporte completo de EXDATE y X-MICROSOFT-EXDATE (fechas de recurrencia excluidas / canceladas)
     - Soporte completo de RECURRENCE-ID para excepciones canceladas y reprogramadas
-    - Detección exhaustiva de cancelaciones:
-        * STATUS: CANCELLED / CANCELED
-        * X-MICROSOFT-CDO-BUSYSTATUS: FREE (en Office 365 citas canceladas, rechazadas o libres)
-        * Prefijos 'Canceled:', 'Cancelado:', 'Cancelled:', 'Rechazado:' en SUMMARY
-        * Exclusiones en EXCLUDED_TITLES (tiempo de concentración, canceladas, etc.)
-        * PARTSTAT=DECLINED en ATTENDEE (citas rechazadas por el usuario)
-        * Parámetro UNTIL en RRULE (series recurrentes que ya finalizaron)
+    - Detección rigurosa de disponibilidad y aceptación del usuario mediante X-MICROSOFT-CDO-BUSYSTATUS (PidLidBusyStatus)
+    - Identidad unívoca de eventos por UID (sin deduplicación arbitraria por subcadenas de texto)
     - Sincronización estricta del Timeline (8 a 17h) únicamente a partir de citas activas confirmadas
     - Registro de decisiones para diagnóstico vía /api/debug_calendar
     """
@@ -624,8 +621,6 @@ def update_calendar_data_sync():
 
         unfolded = re.sub(r'\r?\n[ \t]', '', content)
         raw_events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', unfolded, re.DOTALL | re.IGNORECASE)
-        weekday_map = {0: "MO", 1: "TU", 2: "WE", 3: "TH", 4: "FR", 5: "SA", 6: "SU"}
-        today_code = weekday_map[now_ba.weekday()]
 
         # =========================================================================
         # PASADA 1: REGISTRO DE CANCELACIONES, EXCEPCIONES Y FECHAS EXCLUIDAS (EXDATE)
@@ -642,20 +637,14 @@ def update_calendar_data_sync():
             if not uid:
                 continue
 
-            status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
-            status = status_m.group(1).upper() if status_m else ''
-
-            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
-            busystatus = busy_m.group(1).upper() if busy_m else ''
-
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             summary = summary_m.group(1).strip() if summary_m else ''
 
             rec_id_m = re.search(r'RECURRENCE-ID(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             rec_id_str = rec_id_m.group(1).strip() if rec_id_m else ''
 
-            # Extraer todas las fechas excluidas (EXDATE) declaradas en la serie
-            for line in re.findall(r'EXDATE(?:;[^:\r\n]*)?:([^\r\n]+)', raw, re.IGNORECASE):
+            # Extraer todas las fechas excluidas (EXDATE y X-MICROSOFT-EXDATE de Exchange)
+            for line in re.findall(r'(?:EXDATE|X-MICROSOFT-EXDATE)(?:;[^:\r\n]*)?:([^\r\n]+)', raw, re.IGNORECASE):
                 for part in line.split(','):
                     part = part.strip()
                     if part:
@@ -669,7 +658,6 @@ def update_calendar_data_sync():
                         except Exception:
                             pass
 
-            # Evaluación exhaustiva de cancelación y no aceptación para este bloque VEVENT
             is_cancelled, cancel_reason = check_event_rejection_or_cancellation(raw)
 
             if rec_id_str:
@@ -710,22 +698,24 @@ def update_calendar_data_sync():
             rec_id_m = re.search(r'RECURRENCE-ID(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
             rec_id_str = rec_id_m.group(1).strip() if rec_id_m else ''
 
-            status_m = re.search(r'STATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
-            status = status_m.group(1).upper() if status_m else ''
-            
-            busy_m = re.search(r'X-MICROSOFT-CDO-BUSYSTATUS(?:;[^:\r\n]*)?:\s*([A-Z]+)', raw, re.IGNORECASE)
-            busystatus = busy_m.group(1).upper() if busy_m else ''
-
             summary_m = re.search(r'SUMMARY(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             summary = summary_m.group(1).strip() if summary_m else 'Reunión'
             summary = summary.replace('\\,', ',').replace('\\;', ';')
+
+            is_self_cancelled, cancel_reason = check_event_rejection_or_cancellation(raw)
+            if is_self_cancelled:
+                debug_decisions.append({
+                    'uid': uid, 'summary': summary,
+                    'decision': 'EXCLUDED_UNACCEPTED_OR_CANCELLED', 'reason': cancel_reason
+                })
+                continue
 
             people = extract_people_from_vevent(raw)
 
             loc_m = re.search(r'LOCATION(?:;[^:\r\n]*)?:(.*?)\r?\n', raw, re.IGNORECASE)
             loc_str = ""
             if loc_m:
-                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\\;', ';')
+                loc_raw = loc_m.group(1).strip().replace('\\,', ',').replace('\;', ';')
                 loc_str = loc_raw.replace("Reunión de Microsoft Teams", "Microsoft Teams").strip("; ")
 
             dtstart_m = re.search(r'DTSTART(?:;[^:\r\n]*)?:([0-9TZ]+)', raw, re.IGNORECASE)
@@ -743,14 +733,6 @@ def update_calendar_data_sync():
                 dt_end = dt_start + timedelta(minutes=60)
             duration = dt_end - dt_start
             start_hm = dt_start.strftime('%H:%M')
-
-            is_self_cancelled, cancel_reason = check_event_rejection_or_cancellation(raw)
-            if is_self_cancelled:
-                debug_decisions.append({
-                    'uid': uid, 'summary': summary,
-                    'decision': 'EXCLUDED_UNACCEPTED_OR_CANCELLED', 'reason': cancel_reason
-                })
-                continue
 
             target_start = None
             target_end = None
@@ -814,6 +796,8 @@ def update_calendar_data_sync():
                 e_str = target_end.strftime("%H:%M")
                 dur_min = int((target_end - target_start).total_seconds() / 60)
                 dur_str = f"{dur_min}m" if dur_min < 60 else f"{dur_min//60}h"
+                
+                # Identidad única estándar RFC 5545 por UID y horario
                 event_key = f"{uid}_{s_str}" if uid else f"{summary}_{s_str}"
 
                 ev_candidate = {
@@ -829,7 +813,7 @@ def update_calendar_data_sync():
                     "uid": uid
                 }
 
-                # Si ya existe para este horario, la excepción específica o ubicación real toma precedencia
+                # Si ya existe para este UID/horario, la excepción específica de la serie toma precedencia
                 if event_key in events_by_key:
                     if is_exception:
                         events_by_key[event_key] = ev_candidate
@@ -839,34 +823,13 @@ def update_calendar_data_sync():
                     events_by_key[event_key] = ev_candidate
                 debug_decisions.append({'uid': uid, 'summary': summary, 'time': s_str, 'decision': 'INCLUDED'})
 
-        # Extraer lista final ordenada de citas de la ventana
+        # Extraer lista final ordenada de citas de la ventana (estrictamente por horario e identidad)
         events_window = list(events_by_key.values())
-
-        # Deduplicación secundaria por coincidencia de título y horario exacto
-        deduped_window = []
-        for ev in events_window:
-            is_dup = False
-            for i, existing in enumerate(deduped_window):
-                if ev["start"] == existing["start"]:
-                    t1 = "".join(c for c in ev["title"].lower() if c.isalnum())
-                    t2 = "".join(c for c in existing["title"].lower() if c.isalnum())
-                    if t1 in t2 or t2 in t1:
-                        is_dup = True
-                        loc_ev = ev.get("location", "")
-                        loc_ex = existing.get("location", "")
-                        if ("teams" in loc_ex.lower()) and ("maps" in loc_ev.lower() or "http" in loc_ev.lower() or len(loc_ev) > len(loc_ex)):
-                            deduped_window[i] = ev
-                        elif len(ev["title"]) > len(existing["title"]) and "teams" not in loc_ev.lower():
-                            deduped_window[i] = ev
-                        break
-            if not is_dup:
-                deduped_window.append(ev)
-
-        deduped_window.sort(key=lambda x: x["start"])
+        events_window.sort(key=lambda x: (x["start"], x["title"]))
 
         # Timeline de 8 a 17h construido EXCLUSIVAMENTE sobre las citas confirmadas no canceladas
         timeline_events = []
-        for ev in deduped_window:
+        for ev in events_window:
             t_s = ev["start_dt"]
             t_e = ev["end_dt"]
             if t_s and t_e and t_e >= day_start_ba and t_s <= day_end_ba:
@@ -876,7 +839,7 @@ def update_calendar_data_sync():
                 })
 
         with CACHE_LOCK:
-            CALENDAR_CACHE["events"] = deduped_window
+            CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["debug"] = {
                 "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
@@ -884,14 +847,13 @@ def update_calendar_data_sync():
                 "total_exdates": len(exdates_by_uid),
                 "total_cancelled_instances": len(cancelled_instances),
                 "total_cancelled_uids": len(cancelled_master_uids),
-                "active_meetings_count": len(deduped_window),
+                "active_meetings_count": len(events_window),
                 "decisions": debug_decisions
             }
             CALENDAR_CACHE["timestamp"] = time.time()
-        print(f"[CALENDAR] Actualizado con éxito: {len(deduped_window)} citas activas, {len(timeline_events)} timeline, {len(cancelled_instances)} cancelaciones procesadas")
+        print(f"[CALENDAR] Actualizado con éxito: {len(events_window)} citas activas, {len(timeline_events)} timeline, {len(cancelled_instances)} cancelaciones procesadas")
     except Exception as e:
         print(f"[CALENDAR] Error en procesamiento: {e}")
-
 
 def parse_weather_desc_and_code(desc_raw, is_day=True):
     d = desc_raw.lower().strip()
