@@ -602,13 +602,19 @@ def update_calendar_data_sync():
     today_ymd = now_ba.strftime('%Y%m%d')
 
     try:
+        # Cache-busting contra Microsoft Azure CDN para forzar datos en tiempo real
+        ts_cb = int(time.time())
+        fetch_url = f"{ICAL_URL}&_cb={ts_cb}" if "?" in ICAL_URL else f"{ICAL_URL}?_cb={ts_cb}"
         req = urllib.request.Request(
-            ICAL_URL,
+            fetch_url,
             headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/calendar, text/plain, */*',
                 'Accept-Encoding': 'gzip, deflate',
-                'Connection': 'keep-alive'
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+                'Connection': 'close'
             }
         )
         with urllib.request.urlopen(req, timeout=25) as resp:
