@@ -617,7 +617,14 @@ def update_calendar_data_sync():
                 'Connection': 'close'
             }
         )
+        http_headers = {}
         with urllib.request.urlopen(req, timeout=25) as resp:
+            http_headers = {
+                "Last-Modified": resp.headers.get("Last-Modified", "N/A"),
+                "Date": resp.headers.get("Date", "N/A"),
+                "Age": resp.headers.get("Age", "N/A"),
+                "ETag": resp.headers.get("ETag", "N/A")
+            }
             raw_data = resp.read()
             encoding = resp.headers.get("Content-Encoding", "").lower()
             if "gzip" in encoding or raw_data.startswith(bytes([0x1f, 0x8b])):
@@ -855,7 +862,9 @@ def update_calendar_data_sync():
             CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["debug"] = {
+                "server_build_version": "2026-10-01-v3.2-cachebust",
                 "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
+                "http_headers": http_headers,
                 "total_vevents_found": len(raw_events),
                 "total_exdates": len(exdates_by_uid),
                 "total_cancelled_instances": len(cancelled_instances),
