@@ -638,7 +638,7 @@ def update_calendar_data_sync():
         # =========================================================================
         # PASADA 1: REGISTRO DE CANCELACIONES, EXCEPCIONES Y FECHAS EXCLUIDAS (EXDATE)
         # =========================================================================
-        cancelled_instances = set()      # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM'), (uid, 'HH:MM')}
+        cancelled_instances = set()      # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM')}
         cancelled_master_uids = set()    # {uid} para eventos maestros cancelados
         exdates_by_uid = set()           # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM')}
         active_exceptions = {}           # {(uid, 'YYYYMMDD'): raw_vevent, ...}
@@ -681,7 +681,6 @@ def update_calendar_data_sync():
                     if is_cancelled:
                         cancelled_instances.add((uid, rec_ymd))
                         cancelled_instances.add((uid, f"{rec_ymd}_{rec_hm}"))
-                        cancelled_instances.add((uid, rec_hm))
                         debug_decisions.append({
                             'uid': uid, 'summary': summary, 'rec_id': rec_id_str,
                             'decision': 'CANCELLED_EXCEPTION', 'reason': cancel_reason
@@ -779,7 +778,7 @@ def update_calendar_data_sync():
                         continue
 
                     # 2. Comprobar si esta ocurrencia fue cancelada por un evento hijo RECURRENCE-ID
-                    if (uid, today_ymd) in cancelled_instances or (uid, f"{today_ymd}_{start_hm}") in cancelled_instances or (uid, start_hm) in cancelled_instances:
+                    if (uid, today_ymd) in cancelled_instances or (uid, f"{today_ymd}_{start_hm}") in cancelled_instances:
                         debug_decisions.append({
                             'uid': uid, 'summary': summary, 'time': start_hm,
                             'decision': 'EXCLUDED', 'reason': 'RECURRENCE_ID_CANCELLED'
@@ -798,7 +797,7 @@ def update_calendar_data_sync():
                 # Evento único puntual (no recurrente)
                 if uid in cancelled_master_uids or is_self_cancelled:
                     continue
-                if (uid, today_ymd) in cancelled_instances or (uid, start_hm) in cancelled_instances:
+                if (uid, today_ymd) in cancelled_instances:
                     continue
                 if dt_start.date() == now_ba.date():
                     target_start = dt_start
@@ -862,7 +861,7 @@ def update_calendar_data_sync():
             CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["debug"] = {
-                "server_build_version": "2026-10-01-v3.2-cachebust",
+                "server_build_version": "2026-11-03-v3.4-recurrence-fix",
                 "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
                 "http_headers": http_headers,
                 "total_vevents_found": len(raw_events),
