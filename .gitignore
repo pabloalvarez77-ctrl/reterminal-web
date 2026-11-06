@@ -20,3 +20,6 @@ comparativa_*.png
 
 # Subcarpetas de trabajo
 Proyecto A OK web/
+
+# Scripts locales de Windows
+*.bat
