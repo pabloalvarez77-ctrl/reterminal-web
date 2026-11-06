@@ -1,0 +1,22 @@
+# Archivos de respaldo e iteraciones
+server (*).py
+server (*
+*.bak
+*.tmp
+
+# Archivos de Google Drive / Office locales
+*.gdoc
+*.gsheet
+*.docx
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Mockups e imágenes de trabajo
+mockup_*.png
+dashboard_*.png
+comparativa_*.png
+
+# Subcarpetas de trabajo
+Proyecto A OK web/

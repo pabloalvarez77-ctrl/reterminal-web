@@ -123,22 +123,32 @@ def draw_cloud_shape(draw, cx, cy, r=10, fill_color="#FFFFFF", outline_color="#0
     draw.rectangle([lx + ow_val, by_top, rx - ow_val, by_bot - ow_val], fill=fill_color)
 
 def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
-    """Paleta pura Spectra 6 con nube estilizada vectorial de alta visibilidad"""
-    if not is_day and code in (0, 1): # Luna
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
-        draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
-        draw.ellipse([cx - r + 6, cy - r - 1, cx + r + 2, cy + r - 3], fill="#FFFFFF")
-    elif code in (0, 1): # Sol
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
-        num_rays = 8
-        for i in range(num_rays):
-            angle = i * (2 * math.pi / num_rays)
-            x1 = cx + (r + 2) * math.cos(angle)
-            y1 = cy + (r + 2) * math.sin(angle)
-            x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
-            y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
-            draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
-    elif code == 2: # Parcialmente nublado (sol/luna detrás de nube)
+    """Paleta pura Spectra 6 con mapeo exhaustivo de todos los codigos WMO de Open-Meteo (sin 'else' ciego)"""
+    # Normalizar codigo nulo o invalido
+    if code is None:
+        code = 1 if is_day else 0
+
+    # 1. Cielo claro / despejado / mayormente despejado (WMO 0, 1)
+    if code in (0, 1):
+        if not is_day:
+            # Luna creciente (#FFCC00)
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
+            draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
+            draw.ellipse([cx - r + 6, cy - r - 1, cx + r + 2, cy + r - 3], fill="#FFFFFF")
+        else:
+            # Sol (#FFCC00) con 8 rayos nítidos
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
+            num_rays = 8
+            for i in range(num_rays):
+                angle = i * (2 * math.pi / num_rays)
+                x1 = cx + (r + 2) * math.cos(angle)
+                y1 = cy + (r + 2) * math.sin(angle)
+                x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
+                y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
+                draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
+
+    # 2. Parcialmente nublado (WMO 2)
+    elif code == 2:
         sun_r = int(r * 0.7)
         sun_cx, sun_cy = cx - int(r * 0.35), cy - int(r * 0.35)
         draw.ellipse([sun_cx - sun_r, sun_cy - sun_r, sun_cx + sun_r, sun_cy + sun_r], fill="#FFCC00", outline="#000000", width=1)
@@ -150,23 +160,54 @@ def draw_weather_icon(draw, code, cx, cy, r=7, is_day=True):
                 y2 = sun_cy + (sun_r + 4) * math.sin(angle)
                 draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=1)
         draw_cloud_shape(draw, cx + int(r * 0.2), cy + int(r * 0.2), r=int(r * 0.85), ow=1)
-    elif code == 3: # Cubierto / Nublado (Nube blanca suave y limpia)
+
+    # 3. Cubierto / Nublado / Niebla (WMO 3, 45, 48)
+    elif code in (3, 45, 48):
         ow = 2 if r >= 9 else 1
         draw_cloud_shape(draw, cx, cy, r=r, ow=ow)
-    elif code >= 95: # Tormenta
+
+    # 4. Tormentas electricas con o sin granizo (WMO 95, 96, 99)
+    elif code in (95, 96, 99) or code > 90:
         ow = 2 if r >= 9 else 1
         draw_cloud_shape(draw, cx, cy - 3, r=int(r * 0.9), ow=ow)
         draw.polygon([
             (cx - 2, cy + 2), (cx + 3, cy + 2), (cx, cy + 6),
             (cx + 4, cy + 6), (cx - 3, cy + 13), (cx - 1, cy + 7), (cx - 4, cy + 7)
         ], fill="#FFCC00", outline="#000000")
-    else: # Lluvia
+
+    # 5. Precipitaciones liquidas: Llovizna, lluvia y chaparrones (WMO 51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82)
+    elif (50 <= code <= 69) or (80 <= code <= 82):
         ow = 2 if r >= 9 else 1
         draw_cloud_shape(draw, cx, cy - 3, r=int(r * 0.9), ow=ow)
         drop_len = 5 if r > 7 else 3
         draw.line([cx - 4, cy + 4, cx - 6, cy + 4 + drop_len], fill="#0044CC", width=1)
         draw.line([cx + 1, cy + 4, cx - 1, cy + 4 + drop_len], fill="#0044CC", width=1)
         draw.line([cx + 6, cy + 4, cx + 4, cy + 4 + drop_len], fill="#0044CC", width=1)
+
+    # 6. Precipitaciones solidas: Nieve, granizo blando, chubascos de nieve (WMO 71, 73, 75, 77, 85, 86)
+    elif (70 <= code <= 79) or (85 <= code <= 86):
+        ow = 2 if r >= 9 else 1
+        draw_cloud_shape(draw, cx, cy - 3, r=int(r * 0.9), ow=ow)
+        # Copos de nieve / cristales (#0044CC)
+        draw.line([cx - 4, cy + 5, cx - 4, cy + 9], fill="#0044CC", width=1)
+        draw.line([cx - 6, cy + 7, cx - 2, cy + 7], fill="#0044CC", width=1)
+        draw.line([cx + 4, cy + 5, cx + 4, cy + 9], fill="#0044CC", width=1)
+        draw.line([cx + 2, cy + 7, cx + 6, cy + 7], fill="#0044CC", width=1)
+
+    # 7. Respaldo estricto de seguridad para cualquier codigo desconocido (Sol de dia / Luna de noche)
+    elif not is_day:
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
+        draw.ellipse([cx - r + 5, cy - r - 2, cx + r + 3, cy + r - 2], fill="#FFFFFF", outline="#000000", width=2 if r > 7 else 1)
+        draw.ellipse([cx - r + 6, cy - r - 1, cx + r + 2, cy + r - 3], fill="#FFFFFF")
+    else:
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#FFCC00", outline="#000000", width=2 if r > 7 else 1)
+        for i in range(8):
+            angle = i * (2 * math.pi / 8)
+            x1 = cx + (r + 2) * math.cos(angle)
+            y1 = cy + (r + 2) * math.sin(angle)
+            x2 = cx + (r + 5 if r > 7 else r + 4) * math.cos(angle)
+            y2 = cy + (r + 5 if r > 7 else r + 4) * math.sin(angle)
+            draw.line([int(x1), int(y1), int(x2), int(y2)], fill="#000000", width=2 if r > 7 else 1)
 
 def draw_ford_bronco(draw, x, y, body_color="#008833"):
     """Dibuja la silueta todoterreno de una Ford Bronco Sport (28x16 px)"""
@@ -638,7 +679,7 @@ def update_calendar_data_sync():
         # =========================================================================
         # PASADA 1: REGISTRO DE CANCELACIONES, EXCEPCIONES Y FECHAS EXCLUIDAS (EXDATE)
         # =========================================================================
-        cancelled_instances = set()      # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM')}
+        cancelled_instances = set()      # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM'), (uid, 'HH:MM')}
         cancelled_master_uids = set()    # {uid} para eventos maestros cancelados
         exdates_by_uid = set()           # {(uid, 'YYYYMMDD'), (uid, 'YYYYMMDD_HH:MM')}
         active_exceptions = {}           # {(uid, 'YYYYMMDD'): raw_vevent, ...}
@@ -681,6 +722,7 @@ def update_calendar_data_sync():
                     if is_cancelled:
                         cancelled_instances.add((uid, rec_ymd))
                         cancelled_instances.add((uid, f"{rec_ymd}_{rec_hm}"))
+                        cancelled_instances.add((uid, rec_hm))
                         debug_decisions.append({
                             'uid': uid, 'summary': summary, 'rec_id': rec_id_str,
                             'decision': 'CANCELLED_EXCEPTION', 'reason': cancel_reason
@@ -778,7 +820,7 @@ def update_calendar_data_sync():
                         continue
 
                     # 2. Comprobar si esta ocurrencia fue cancelada por un evento hijo RECURRENCE-ID
-                    if (uid, today_ymd) in cancelled_instances or (uid, f"{today_ymd}_{start_hm}") in cancelled_instances:
+                    if (uid, today_ymd) in cancelled_instances or (uid, f"{today_ymd}_{start_hm}") in cancelled_instances or (uid, start_hm) in cancelled_instances:
                         debug_decisions.append({
                             'uid': uid, 'summary': summary, 'time': start_hm,
                             'decision': 'EXCLUDED', 'reason': 'RECURRENCE_ID_CANCELLED'
@@ -797,7 +839,7 @@ def update_calendar_data_sync():
                 # Evento único puntual (no recurrente)
                 if uid in cancelled_master_uids or is_self_cancelled:
                     continue
-                if (uid, today_ymd) in cancelled_instances:
+                if (uid, today_ymd) in cancelled_instances or (uid, start_hm) in cancelled_instances:
                     continue
                 if dt_start.date() == now_ba.date():
                     target_start = dt_start
@@ -861,7 +903,7 @@ def update_calendar_data_sync():
             CALENDAR_CACHE["events"] = events_window
             CALENDAR_CACHE["today_all_events"] = timeline_events
             CALENDAR_CACHE["debug"] = {
-                "server_build_version": "2026-11-03-v3.4-recurrence-fix",
+                "server_build_version": "2026-11-06-v3.5-wmo-codes-exhaustivo",
                 "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
                 "http_headers": http_headers,
                 "total_vevents_found": len(raw_events),
@@ -1260,12 +1302,14 @@ def render_png_dashboard():
                 if "desc_text" in wdata["current"]:
                     desc_cur = wdata["current"]["desc_text"][:24]
                 else:
-                    if code == 0: desc_cur = "Despejado" if is_day else "Cielo claro"
-                    elif code in (1, 2): desc_cur = "Mayormente despejado" if is_day else "Parcialmente nublado"
-                    elif code == 3: desc_cur = "Nublado"
-                    elif 51 <= code <= 65: desc_cur = "Lluvia ligera"
-                    elif 80 <= code <= 82: desc_cur = "Chaparrones"
-                    elif code >= 95: desc_cur = "Tormenta"
+                    if code in (0, 1): desc_cur = "Despejado" if is_day else "Cielo claro"
+                    elif code == 2: desc_cur = "Parcialmente nublado"
+                    elif code in (3, 45, 48): desc_cur = "Nublado" if code == 3 else "Niebla"
+                    elif (50 <= code <= 69): desc_cur = "Lluvia"
+                    elif (70 <= code <= 79) or (85 <= code <= 86): desc_cur = "Nieve"
+                    elif (80 <= code <= 82): desc_cur = "Chaparrones"
+                    elif code >= 90: desc_cur = "Tormenta"
+                    else: desc_cur = "Despejado" if is_day else "Cielo claro"
                 
                 min_c = round(wdata["daily"]["temperature_2m_min"][0])
                 max_c = round(wdata["daily"]["temperature_2m_max"][0])
@@ -1731,12 +1775,16 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                     icon_name = "SOL con rayos (amarillo)"
                 elif code_val == 2:
                     icon_name = f"PARCIALMENTE NUBLADO ({'Sol' if is_day_calc else 'Luna'} detrás de nube)"
-                elif code_val == 3:
-                    icon_name = "NUBLADO (Nube blanca pura)"
-                elif code_val >= 95:
+                elif code_val in (3, 45, 48):
+                    icon_name = "NUBLADO / NIEBLA (Nube blanca pura)"
+                elif (70 <= code_val <= 79) or (85 <= code_val <= 86):
+                    icon_name = "NIEVE (Nube con copos azules)"
+                elif code_val in (95, 96, 99) or code_val > 90:
                     icon_name = "TORMENTA (Nube con rayo amarillo)"
-                else:
+                elif (50 <= code_val <= 69) or (80 <= code_val <= 82):
                     icon_name = "LLUVIA (Nube con gotas azules)"
+                else:
+                    icon_name = f"{'SOL con rayos' if is_day_calc else 'LUNA'} (por defecto)"
 
                 desc_text_final = "Despejado" if is_day_calc else "Cielo claro"
                 if wdata and "desc_text" in wdata.get("current", {}):
