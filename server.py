@@ -1868,7 +1868,35 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                 elif code_val == 3:
                     desc_text_final = "Nublado"
 
+                google_weather_test = {}
+                if GOOGLE_MAPS_API_KEY:
+                    try:
+                        url_gw = f"https://weather.googleapis.com/v1/forecast/days:lookup?key={GOOGLE_MAPS_API_KEY}&location.latitude={AEROPARQUE_LAT}&location.longitude={AEROPARQUE_LON}&days=3&unitsSystem=METRIC"
+                        req_gw = urllib.request.Request(url_gw, headers={'User-Agent': 'reTerminal/2.0'})
+                        with urllib.request.urlopen(req_gw, timeout=6) as r_gw:
+                            google_weather_test = {
+                                "status": "ENABLED",
+                                "http_code": r_gw.status,
+                                "response": json.loads(r_gw.read().decode('utf-8', errors='ignore'))
+                            }
+                    except urllib.error.HTTPError as he:
+                        err_body = he.read().decode('utf-8', errors='ignore')
+                        try:
+                            err_json = json.loads(err_body)
+                        except Exception:
+                            err_json = err_body
+                        google_weather_test = {
+                            "status": "ERROR_OR_DISABLED",
+                            "http_code": he.code,
+                            "details": err_json
+                        }
+                    except Exception as ge:
+                        google_weather_test = {"status": "EXCEPTION", "error": str(ge)}
+                else:
+                    google_weather_test = {"status": "NO_API_KEY_SET"}
+
                 weather_report = {
+                    "google_weather_api_test": google_weather_test,
                     "now_ba": now_ba.strftime("%Y-%m-%d %H:%M:%S"),
                     "station": "Aeroparque Jorge Newbery (SABE, lat: -34.5586, lon: -58.4164)",
                     "calculated_is_day": is_day_calc,
